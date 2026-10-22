@@ -62,7 +62,9 @@ namespace
     constexpr uint32_t kISemaWaitPc = 0x00160300u;
     constexpr uint32_t kISemaResumePc = 0x00160310u;
     constexpr uint32_t kISemaDriverPc = 0x00160320u;
+    constexpr uint32_t kISemaDriverResumePc = 0x00160328u;
     constexpr uint32_t kISemaHandlerPc = 0x00160330u;
+    constexpr uint32_t kISemaHandlerContinuePc = 0x00160340u;
     constexpr uint32_t kEventWaitPc = 0x00160400u;
     constexpr uint32_t kEventResumePc = 0x00160410u;
     constexpr uint32_t kEventProducerPc = 0x00160420u;
@@ -72,6 +74,13 @@ namespace
     constexpr uint32_t kInvocationQueuePc = 0x00160530u;
     constexpr uint32_t kInvocationQueueResumePc = 0x00160540u;
     constexpr uint32_t kInvocationQueueHandlerPc = 0x00160550u;
+    constexpr uint32_t kAlarmWaitPc = 0x00160600u;
+    constexpr uint32_t kAlarmResumePc = 0x00160610u;
+    constexpr uint32_t kAlarmDriverPc = 0x00160620u;
+    constexpr uint32_t kAlarmDriverResumePc = 0x00160628u;
+    constexpr uint32_t kAlarmHandlerPc = 0x00160630u;
+    constexpr uint32_t kAlarmHandlerContinuePc = 0x00160640u;
+    constexpr uint32_t kIntcStatDriverPc = 0x00160700u;
 
     constexpr uint32_t kTimer2Count = 0x10001000u;
     constexpr uint32_t kTimer2Mode = 0x10001010u;
@@ -191,6 +200,15 @@ namespace
         scheduler.waitVSync(scheduler.currentVSyncTick());
     }
 
+    // No handler is registered and cause 2 is masked: INTC_STAT must still latch it,
+    // because guest code such as sceGsSyncV polls the status bit directly.
+    void schedulerIntcStatDriver(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        runtime->eeScheduler().dispatchIrq(false, 2u);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
     void schedulerIrqResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_dispatchTrace.push_back(3);
@@ -230,6 +248,12 @@ namespace
     {
         g_dispatchTrace.push_back(3);
         runtime->eeScheduler().signalSemaphore(g_testSemaphoreId, true);
+        ctx->pc = kISemaHandlerContinuePc;
+        (void)runtime->eeScheduler().checkpointDue();
+    }
+
+    void schedulerISemaHandlerContinue(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
         g_dispatchTrace.push_back(4);
         ctx->pc = 0u;
     }
@@ -237,8 +261,13 @@ namespace
     void schedulerISemaDriver(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
     {
         g_dispatchTrace.push_back(2);
-        ctx->pc = 0u;
+        ctx->pc = kISemaDriverResumePc;
         runtime->eeScheduler().dispatchIrq(true, 5u);
+    }
+
+    void schedulerISemaDriverResume(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        ctx->pc = 0u;
     }
 
     void schedulerISemaWait(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
@@ -373,6 +402,58 @@ namespace
         ctx->pc = 0u;
         runtime->requestStop();
     }
+
+    void schedulerAlarmHandler(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(3);
+        runtime->eeScheduler().signalSemaphore(g_testSemaphoreId, false);
+        ctx->pc = kAlarmHandlerContinuePc;
+        runtime->eeScheduler().transferIfRequested(false);
+    }
+
+    void schedulerAlarmHandlerContinue(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        g_dispatchTrace.push_back(4);
+        ctx->pc = 0u;
+    }
+
+    void schedulerAlarmDriver(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(2);
+        EeScheduler &scheduler = runtime->eeScheduler();
+        scheduler.setAlarm(1u, kAlarmHandlerPc, 0u, 0u, 0u);
+        ctx->pc = kAlarmDriverResumePc;
+    }
+
+    void schedulerAlarmDriverResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->pc = 0u;
+        (void)runtime->eeScheduler().checkpointDue(3000u);
+    }
+
+    void schedulerAlarmWait(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(1);
+        EeScheduler &scheduler = runtime->eeScheduler();
+        g_testSemaphoreId = scheduler.createSemaphore(0, 1, 0u, 0u);
+        EeThreadCreateParams driver{};
+        driver.entry = kAlarmDriverPc;
+        driver.stack = 0x1E000u;
+        driver.stackSize = 0x1000u;
+        driver.priority = 10;
+        const int driverId = scheduler.createThread(driver);
+        scheduler.startThread(driverId, 0u, *ctx, false);
+        ctx->pc = kAlarmResumePc;
+        scheduler.waitSemaphore(g_testSemaphoreId);
+    }
+
+    void schedulerAlarmWaitResume(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_dispatchTrace.push_back(5);
+        g_resumedResult = getRegS32(*ctx, 2);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
 }
 
 void register_ps2_runtime_interrupt_tests()
@@ -502,6 +583,21 @@ void register_ps2_runtime_interrupt_tests()
             cleanupRuntime(env);
         });
 
+        tc.Run("INTC dispatch latches INTC_STAT even when the cause has no handler", [](TestCase &t)
+        {
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "runtime memory initialize should succeed");
+            env.runtime.registerFunction(kIntcStatDriverPc, schedulerIntcStatDriver);
+
+            R5900Context mainContext{};
+            mainContext.pc = kIntcStatDriverPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            t.Equals(env.runtime.memory().read32(0x1000F000u) & (1u << 2u), 1u << 2u,
+                     "an INTC VBLANK_START dispatch should set INTC_STAT bit 2");
+        });
+
         tc.Run("VBlank deadline resumes the waiter and publishes flag tick and FIELD atomically", [](TestCase &t)
         {
             TestEnv env;
@@ -608,7 +704,9 @@ void register_ps2_runtime_interrupt_tests()
             env.runtime.registerFunction(kISemaWaitPc, schedulerISemaWait);
             env.runtime.registerFunction(kISemaResumePc, schedulerISemaResume);
             env.runtime.registerFunction(kISemaDriverPc, schedulerISemaDriver);
+            env.runtime.registerFunction(kISemaDriverResumePc, schedulerISemaDriverResume);
             env.runtime.registerFunction(kISemaHandlerPc, schedulerISemaHandler);
+            env.runtime.registerFunction(kISemaHandlerContinuePc, schedulerISemaHandlerContinue);
 
             g_dispatchTrace.clear();
             g_resumedResult = -1;
@@ -630,6 +728,54 @@ void register_ps2_runtime_interrupt_tests()
                 t.Equals(static_cast<uint32_t>(semaphore->waiters.size()), 0u,
                          "the awakened waiter must be removed from the semaphore queue");
             }
+        });
+
+        tc.Run("IRQ handler marker precedes awakened higher-priority thread", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kISemaWaitPc, schedulerISemaWait);
+            env.runtime.registerFunction(kISemaResumePc, schedulerISemaResume);
+            env.runtime.registerFunction(kISemaDriverPc, schedulerISemaDriver);
+            env.runtime.registerFunction(kISemaDriverResumePc, schedulerISemaDriverResume);
+            env.runtime.registerFunction(kISemaHandlerPc, schedulerISemaHandler);
+            env.runtime.registerFunction(kISemaHandlerContinuePc, schedulerISemaHandlerContinue);
+
+            g_dispatchTrace.clear();
+            g_resumedResult = -1;
+            R5900Context mainContext{};
+            mainContext.pc = kISemaWaitPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            const std::vector<int> expected{1, 2, 3, 4, 5};
+            t.IsTrue(g_dispatchTrace == expected,
+                     "the handler's post-signal marker must precede the awakened thread's first instruction");
+            t.Equals(g_resumedResult, g_testSemaphoreId,
+                     "the awakened thread must eventually receive the semaphore handoff");
+        });
+
+        tc.Run("alarm handler marker precedes awakened higher-priority thread", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(kAlarmWaitPc, schedulerAlarmWait);
+            env.runtime.registerFunction(kAlarmResumePc, schedulerAlarmWaitResume);
+            env.runtime.registerFunction(kAlarmDriverPc, schedulerAlarmDriver);
+            env.runtime.registerFunction(kAlarmDriverResumePc, schedulerAlarmDriverResume);
+            env.runtime.registerFunction(kAlarmHandlerPc, schedulerAlarmHandler);
+            env.runtime.registerFunction(kAlarmHandlerContinuePc, schedulerAlarmHandlerContinue);
+
+            g_dispatchTrace.clear();
+            g_resumedResult = -1;
+            R5900Context mainContext{};
+            mainContext.pc = kAlarmWaitPc;
+            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
+            env.runtime.eeScheduler().run();
+
+            const std::vector<int> expected{1, 2, 3, 4, 5};
+            t.IsTrue(g_dispatchTrace == expected,
+                     "the alarm handler's post-signal marker must precede the awakened thread's first instruction");
+            t.Equals(g_resumedResult, g_testSemaphoreId,
+                     "the awakened thread must eventually receive the semaphore handoff");
         });
 
         tc.Run("event-flag completion writes observed bits before strict-priority resume", [](TestCase &t)

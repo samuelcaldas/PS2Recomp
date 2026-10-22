@@ -1144,6 +1144,29 @@ void register_ps2_memory_tests()
             t.IsTrue(contentOk, "scratchpad alias chain payload should match scratchpad bytes");
         });
 
+        tc.Run("INTC_STAT latches raised causes and clears them on write-one", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            constexpr uint32_t kIntcStat = 0x1000F000u;
+            constexpr uint32_t kVBlankStartBit = 1u << 2u;
+            constexpr uint32_t kVBlankEndBit = 1u << 3u;
+
+            t.Equals(mem.read32(kIntcStat), 0u, "INTC_STAT should start clear");
+            mem.write32(kIntcStat, kVBlankStartBit);
+            t.Equals(mem.read32(kIntcStat), 0u, "writing a one must not set an INTC_STAT bit");
+
+            mem.raiseIntcStatus(2u);
+            mem.raiseIntcStatus(3u);
+            t.Equals(mem.read32(kIntcStat), kVBlankStartBit | kVBlankEndBit, "raised causes should latch");
+
+            mem.write32(kIntcStat, 0u);
+            t.Equals(mem.read32(kIntcStat), kVBlankStartBit | kVBlankEndBit, "writing zero should keep bits");
+
+            mem.write32(kIntcStat, kVBlankStartBit);
+            t.Equals(mem.read32(kIntcStat), kVBlankEndBit, "writing a one should clear only that bit");
+        });
+
         tc.Run("native GIF image upload recognizes canonical load-image chain", [](TestCase &t)
         {
             PS2Memory mem;

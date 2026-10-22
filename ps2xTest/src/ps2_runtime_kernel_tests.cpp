@@ -630,6 +630,54 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(semaphore->option, semaParam.option, "semaphore option must be decoded from offset 0x14");
         });
 
+        tc.Run("CreateSema accepts max_count 0 as unbounded, like the EE kernel", [](TestCase &t)
+        {
+            TestEnv env;
+            EeSemaStatus semaParam{};
+            semaParam.max_count = 0;
+            semaParam.init_count = 0;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &semaParam, sizeof(semaParam));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int semaId = getRegS32(env.ctx, 2);
+            t.IsTrue(semaId > 0, "max_count 0 must not fail creation");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), semaId, "signals are not capped when max_count is 0");
+            const EeSemaphore *semaphore = env.runtime.eeScheduler().semaphore(semaId);
+            t.IsTrue(semaphore != nullptr && semaphore->count == 2, "both signals are counted");
+
+            semaParam.max_count = 1;
+            semaParam.init_count = -1;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &semaParam, sizeof(semaParam));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "a negative init_count is still rejected");
+        });
+
+        tc.Run("StartThread returns the started thread id, like the EE kernel", [](TestCase &t)
+        {
+            TestEnv env;
+            env.runtime.registerFunction(K_SCHED_HIGH, schedulerHigh);
+            EeThreadCreateAbi threadParam{};
+            threadParam.func = K_SCHED_HIGH;
+            threadParam.stack = 0x00018000u;
+            threadParam.stack_size = 0x1000;
+            threadParam.initial_priority = 120;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &threadParam, sizeof(threadParam));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateThread(env.rdram.data(), &env.ctx, &env.runtime);
+            const int threadId = getRegS32(env.ctx, 2);
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(threadId));
+            setRegU32(env.ctx, 5, 0u);
+            StartThread(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), threadId, "games compare the result with the id they passed");
+        });
+
         tc.Run("EE scheduler selects absolute priority then FIFO", [](TestCase &t)
         {
             TestEnv env;
