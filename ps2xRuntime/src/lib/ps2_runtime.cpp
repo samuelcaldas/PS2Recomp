@@ -92,7 +92,8 @@ namespace
     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
-    constexpr uint32_t kGuestHeapHardLimit = PS2_RAM_SIZE - 0x00100000u;
+    constexpr uint32_t kGuestHeapHardLimit = PS2_HLE_RESERVATION_BASE;
+    static_assert(PS2_HLE_RESERVATION_SIZE == 0x00040000u);
 
     constexpr uint32_t COP0_CAUSE_EXCCODE_MASK = 0x0000007Cu;
     constexpr uint32_t COP0_CAUSE_BD = 0x80000000u;
@@ -505,7 +506,7 @@ PS2Runtime::PS2Runtime()
     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
-    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    m_asyncCallbackStackFloor = PS2_ASYNC_STACK_FLOOR;
     m_asyncCallbackStackTop = PS2_RAM_SIZE;
 }
 
@@ -990,7 +991,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
     {
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
         const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
+        m_asyncCallbackStackFloor = PS2_ASYNC_STACK_FLOOR;
         m_asyncCallbackStackTop = PS2_RAM_SIZE;
     }
 

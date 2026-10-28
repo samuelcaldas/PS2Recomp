@@ -350,6 +350,23 @@ void register_ps2_memory_tests()
             t.Equals(words[3], 0x44556677u, "VU0 data lane 3 should match");
         });
 
+        tc.Run("KSEG aliases preserve upper RAM without lower-half aliasing", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            constexpr uint32_t upper = 0x02000040u;
+            constexpr uint32_t lower = 0x00000040u;
+            mem.write64(upper, 0x1122334455667788ull);
+            t.Equals(mem.read64(lower), 0u, "upper RAM write must not alter corresponding lower RAM");
+            t.Equals(mem.read64(0x82000040u), 0x1122334455667788ull,
+                     "KSEG0 alias should resolve to upper physical RAM");
+            t.Equals(mem.read64(0xA2000040u), 0x1122334455667788ull,
+                     "KSEG1 alias should resolve to upper physical RAM");
+            mem.write32(PS2_RAM_SIZE - 4u, 0xA1B2C3D4u);
+            t.Equals(mem.read32(PS2_RAM_SIZE - 4u), 0xA1B2C3D4u,
+                     "last valid upper-RAM word should be accessible");
+        });
+
         tc.Run("fast memory helpers wrap safely at RAM boundary", [](TestCase &t)
         {
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
@@ -367,7 +384,7 @@ void register_ps2_memory_tests()
 
             const uint64_t wrappedRead = Ps2FastRead64(rdram.data(), tail);
             t.Equals(wrappedRead, 0x44332211D4C3B2A1ull,
-                     "Ps2FastRead64 should wrap across the 32MB boundary");
+                     "Ps2FastRead64 should wrap across the 64MB boundary");
 
             Ps2FastWrite64(rdram.data(), tail, 0x8877665544332211ull);
             t.Equals(static_cast<uint32_t>(rdram[tail + 0u]), 0x11u, "write byte 0 should land at tail+0");

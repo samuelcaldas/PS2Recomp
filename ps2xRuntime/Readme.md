@@ -1,7 +1,7 @@
 # Runtime Library
 The runtime library provides the execution environment for recompiled code, including:
 
-* Memory management (32MB main RAM, scratchpad, etc.)
+* Memory management (64 MiB main RAM, scratchpad, etc.)
 * Register context (128-bit GPRs, VU0 registers, etc.)
 * Function table for dynamic linking
 * Basic PS2 system call stubs
@@ -24,6 +24,7 @@ Expected environment:
 The CMake for `ps2xRuntime` consumes those preinstalled headers and libraries from VitaSDK. It does not fetch or install the Vita raylib fork for you.
 
 ## Adding Custom Function Implementations
+
 You can add custom implementations for PS2 system calls or game functions by:
 
 1. Creating function implementations that match the signature:

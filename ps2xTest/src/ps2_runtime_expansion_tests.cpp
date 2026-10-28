@@ -315,6 +315,25 @@ void register_ps2_runtime_expansion_tests()
 {
     MiniTest::Case("PS2RuntimeExpansion", [](TestCase &tc)
     {
+        tc.Run("64MB heap stops below HLE pools and callback stacks", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            const uint32_t hleBase = PS2_RAM_SIZE - 0x00140000u;
+            const uint32_t stackFloor = PS2_RAM_SIZE - 0x00100000u;
+            runtime.configureGuestHeap(0x00100000u);
+
+            t.Equals(runtime.guestHeapLimit(), hleBase,
+                     "default guest heap must end below the reserved HLE pools");
+            const uint32_t finalHeapAllocation = runtime.guestMalloc(hleBase - 0x00100000u);
+            t.Equals(finalHeapAllocation, 0x00100000u,
+                     "heap may allocate up to its exclusive HLE reservation boundary");
+            t.Equals(runtime.guestMalloc(1u), 0u,
+                     "heap must not allocate into HLE pools");
+            const uint32_t stack = runtime.reserveAsyncCallbackStack(0x1000u);
+            t.IsTrue(stack >= stackFloor && stack < PS2_RAM_SIZE,
+                     "callback stacks must use the independent top-of-RAM stack region");
+        });
+
         tc.Run("differential decoder/codegen gpr-write contract for MULT and DIV families", [](TestCase &t)
         {
             R5900Decoder decoder;

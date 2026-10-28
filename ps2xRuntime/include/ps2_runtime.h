@@ -566,10 +566,10 @@ private:
     std::vector<GuestHeapBlock> m_guestHeapBlocks;
     uint32_t m_guestHeapBase = 0x00100000u;
     uint32_t m_guestHeapEnd = 0x00100000u;
-    uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
+    uint32_t m_guestHeapLimit = PS2_HLE_RESERVATION_BASE;
     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
     bool m_guestHeapConfigured = false;
-    uint32_t m_asyncCallbackStackFloor = PS2_RAM_SIZE - 0x00100000u;
+    uint32_t m_asyncCallbackStackFloor = PS2_ASYNC_STACK_FLOOR;
     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
     std::atomic<uint32_t> m_presentedFrameWidth{0};
     std::atomic<uint32_t> m_presentedFrameHeight{0};

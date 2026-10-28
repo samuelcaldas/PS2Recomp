@@ -25,6 +25,11 @@ class GS;
 
 constexpr uint32_t PS2_RAM_SIZE = 64u * 1024u * 1024u; // 64MB
 constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for 64MB alignment
+constexpr uint32_t PS2_HLE_RESERVATION_SIZE = 0x00040000u;
+constexpr uint32_t PS2_HLE_RESERVATION_BASE = PS2_RAM_SIZE - 0x00140000u;
+constexpr uint32_t PS2_ASYNC_STACK_FLOOR = PS2_RAM_SIZE - 0x00100000u;
+static_assert(PS2_HLE_RESERVATION_BASE + PS2_HLE_RESERVATION_SIZE == PS2_ASYNC_STACK_FLOOR,
+              "HLE reservation must directly precede callback stacks");
 constexpr uint32_t PS2_RAM_BASE = 0x00000000;          // Physical base of RDRAM
 constexpr uint32_t PS2_SCRATCHPAD_BASE = 0x70000000;
 constexpr uint32_t PS2_SCRATCHPAD_ALIAS_BASE = 0xF0000000;
