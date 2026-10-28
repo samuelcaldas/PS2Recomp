@@ -909,6 +909,12 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
             return false;
         }
 
+        if (!scratch && segmentMemEnd > PS2_HLE_RESERVATION_BASE)
+        {
+            std::cerr << "ELF segment " << i << " overlaps reserved HLE or callback-stack memory." << std::endl;
+            return false;
+        }
+
         uint8_t *destBase = scratch ? m_memory.getScratchpad() : m_memory.getRDRAM();
         if (!destBase)
         {

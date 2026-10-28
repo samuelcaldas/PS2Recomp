@@ -17,6 +17,9 @@
 #include "Stubs/GS.h"
 #include "Stubs/VU.h"
 
+#include <elfio/elfio.hpp>
+#include <filesystem>
+#include <chrono>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -315,6 +318,47 @@ void register_ps2_runtime_expansion_tests()
 {
     MiniTest::Case("PS2RuntimeExpansion", [](TestCase &tc)
     {
+        tc.Run("ELF loads reject HLE and stack reservations before writes", [](TestCase &t)
+        {
+            const auto path = std::filesystem::temp_directory_path() /
+                ("ps2-ram-reservation-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".elf");
+            struct RemoveFixture {
+                std::filesystem::path path;
+                ~RemoveFixture() { std::filesystem::remove(path); }
+            } fixture{path};
+            for (uint32_t address : {PS2_HLE_RESERVATION_BASE - 8u, PS2_HLE_RESERVATION_BASE - 4u,
+                                     PS2_HLE_RESERVATION_BASE, PS2_ASYNC_STACK_FLOOR,
+                                     0x80000000u | PS2_HLE_RESERVATION_BASE})
+            {
+                ELFIO::elfio writer;
+                writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+                writer.set_type(ELFIO::ET_EXEC);
+                writer.set_machine(ELFIO::EM_MIPS);
+                writer.set_entry(address);
+                auto *section = writer.sections.add(".data");
+                section->set_type(ELFIO::SHT_PROGBITS);
+                section->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_WRITE);
+                section->set_address(address);
+                section->set_addr_align(4);
+                section->set_data("12345678", 8);
+                auto *segment = writer.segments.add();
+                segment->set_type(ELFIO::PT_LOAD);
+                segment->set_virtual_address(address);
+                segment->set_physical_address(address);
+                segment->set_flags(ELFIO::PF_R | ELFIO::PF_W);
+                segment->set_align(4);
+                segment->add_section_index(section->get_index(), 4);
+                t.IsTrue(writer.save(path.string()), "save synthetic ELF fixture");
+                PS2Runtime runtime;
+                runtime.memory().initialize();
+                auto *memory = runtime.memory().getRDRAM();
+                memory[PS2_HLE_RESERVATION_BASE] = 0xabu;
+                const bool valid = address == PS2_HLE_RESERVATION_BASE - 8u;
+                t.Equals(runtime.loadELF(path.string()), valid, "only a segment wholly below reservations loads");
+                t.Equals(memory[PS2_HLE_RESERVATION_BASE], uint8_t{0xab}, "reserved bytes remain untouched");
+            }
+        });
+
         tc.Run("64MB heap stops below HLE pools and callback stacks", [](TestCase &t)
         {
             PS2Runtime runtime;

@@ -379,18 +379,18 @@ void register_ps2_async_stack_tests()
         tc.Run("callback stacks are carved below the main thread stack", [](TestCase &t)
         {
             PS2Runtime runtime;
-            runtime.keepAsyncCallbackStacksBelow(0x01FE0000u);
+            runtime.keepAsyncCallbackStacksBelow((PS2_RAM_SIZE - 0x00020000u));
             const uint32_t top = runtime.reserveAsyncCallbackStack(0x4000u, 16u);
-            t.IsTrue(top != 0u && top <= 0x01FE0000u, "the first callback stack ends below the main stack base");
+            t.IsTrue(top != 0u && top <= (PS2_RAM_SIZE - 0x00020000u), "the first callback stack ends below the main stack base");
         });
 
         tc.Run("a boundary above the current top changes nothing", [](TestCase &t)
         {
             PS2Runtime runtime;
-            runtime.keepAsyncCallbackStacksBelow(0x01FE0000u);
-            runtime.keepAsyncCallbackStacksBelow(0x01FF0000u);
+            runtime.keepAsyncCallbackStacksBelow((PS2_RAM_SIZE - 0x00020000u));
+            runtime.keepAsyncCallbackStacksBelow((PS2_RAM_SIZE - 0x00010000u));
             const uint32_t top = runtime.reserveAsyncCallbackStack(0x4000u, 16u);
-            t.IsTrue(top != 0u && top <= 0x01FE0000u, "the lower boundary still applies");
+            t.IsTrue(top != 0u && top <= (PS2_RAM_SIZE - 0x00020000u), "the lower boundary still applies");
         });
     });
 }
