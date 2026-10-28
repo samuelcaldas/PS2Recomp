@@ -1,4 +1,5 @@
 #include "SifCdvdServer.h"
+#include "runtime/ps2_memory.h"
 
 #include <cstring>
 
@@ -22,7 +23,7 @@ namespace ps2_sif
         constexpr uint64_t kCdCapacityBytes = 360000ull * 2048ull;
         constexpr uint32_t kStatusPaused = 0x0Au;
         constexpr uint32_t kStatusSeek = 0x12u;
-        constexpr uint32_t kEeRamMask = 0x01FFFFFFu;
+        constexpr uint32_t kEeRamMask = PS2_RAM_MASK;
         constexpr uint32_t kChainTerminator = ~0u;
         constexpr size_t kChainMaxTuples = 64u;
 
