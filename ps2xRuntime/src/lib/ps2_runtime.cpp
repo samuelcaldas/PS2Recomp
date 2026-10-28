@@ -14,6 +14,9 @@
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+#include "ps2_switch_presenter.h"
+#endif
 
 #include <cstdlib>
 #include <iostream>
@@ -376,6 +379,8 @@ namespace
     }
 }
 
+static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
+
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
 {
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
@@ -387,7 +392,6 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static uint32_t s_lastHeight = 0u;
     static bool s_hasUploadedFrame = false;
     static std::vector<uint8_t> s_scratch;
-    static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
 
     const uint64_t currentTick = rt->eeScheduler().currentVSyncTick();
     const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick;
@@ -474,11 +478,22 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         }
     }
 
+#if !defined(PLATFORM_SWITCH) && !defined(__SWITCH__)
     UpdateTexture(tex, s_uploadBuffer.data());
+#else
+    (void)tex;
+#endif
     outWidth = width;
     outHeight = height;
     s_hasUploadedFrame = true;
 }
+
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+static const uint8_t* GetUploadedFrameBuffer()
+{
+    return s_uploadBuffer.data();
+}
+#endif
 
 PS2Runtime::PS2Runtime()
 {
@@ -739,6 +754,11 @@ bool PS2Runtime::initialize(const char *title)
         }
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
+#elif defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        // On Nintendo Switch, presentation uses native GLES/EGL on nwindow directly.
+        // Skip raylib's desktop SDL window initialization to prevent crash in Horizon OS.
+        (void)title;
+        m_audioBackend.setAudioReady(false);
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
         int hostWinW = HOST_WINDOW_WIDTH;
@@ -2615,11 +2635,15 @@ void PS2Runtime::run()
 
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    SwitchGlesPresenter::Instance().Initialize();
+#else
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
     Texture2D frameTex = LoadTextureFromImage(blank);
     SetTextureFilter(frameTex, TEXTURE_FILTER_BILINEAR);
     UnloadImage(blank);
+#endif
 
     std::atomic<bool> gameThreadFinished{false};
 
@@ -2696,6 +2720,25 @@ void PS2Runtime::run()
         });
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        Texture2D dummyTex{};
+        UploadFrame(dummyTex, this, presentWidth, presentHeight);
+        m_presentedFrameWidth.store(presentWidth, std::memory_order_release);
+        m_presentedFrameHeight.store(presentHeight, std::memory_order_release);
+
+        SwitchGlesPresenter::Instance().Present(GetUploadedFrameBuffer(), FB_WIDTH, FB_HEIGHT, presentWidth, presentHeight);
+        if (m_presentationCallback)
+        {
+            m_presentationCallback(*this, m_presentationUserData);
+        }
+
+        if (!appletMainLoop())
+        {
+            RUNTIME_LOG("[run] appletMainLoop requested exit, breaking out of loop");
+            requestStop();
+            break;
+        }
+#else
         UploadFrame(frameTex, this, presentWidth, presentHeight);
         m_presentedFrameWidth.store(presentWidth, std::memory_order_release);
         m_presentedFrameHeight.store(presentHeight, std::memory_order_release);
@@ -2732,6 +2775,7 @@ void PS2Runtime::run()
             requestStop();
             break;
         }
+#endif
     }
 
     requestStop();
@@ -2745,8 +2789,12 @@ void PS2Runtime::run()
         m_debugUiShutdownCallback(*this, m_debugUiUserData);
         m_debugUiInitialized = false;
     }
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    SwitchGlesPresenter::Instance().Shutdown();
+#else
     UnloadTexture(frameTex);
     CloseWindow();
+#endif
 
     RUNTIME_LOG("[run] exiting loop");
 }
