@@ -1,0 +1,143 @@
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 2c173b9..cd641cc 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -367,6 +367,14 @@ public:
+     bool registerFunction(uint32_t address, RecompiledFunction func);
+     RecompiledFunction lookupFunction(uint32_t address);
+     bool hasFunction(uint32_t address) const;
++
++    // Overlay code. Several overlays share a guest region; the u32 at idAddress (inside the
++    // region) names the one currently loaded. Functions registered for another id are not
++    // visible. The region must not overlap another region.
++    bool addOverlayRegion(uint32_t base, uint32_t size, uint32_t idAddress);
++    // Fails if no region contains address, if address is unaligned, or if (overlayId, address)
++    // is already registered.
++    bool registerOverlayFunction(uint32_t overlayId, uint32_t address, RecompiledFunction func);
+     bool dispatchGuestBranch(uint8_t *rdram,
+                              R5900Context *ctx,
+                              uint32_t targetPc,
+@@ -521,6 +529,16 @@ private:
+ 
+ private:
+     PS2Memory m_memory;
++    struct OverlayRegion
++    {
++        uint32_t base;
++        uint32_t size;
++        uint32_t idAddress;
++    };
++    std::vector<OverlayRegion> m_overlayRegions;
++    // overlay id -> guest address -> function
++    std::unordered_map<uint32_t, std::unordered_map<uint32_t, RecompiledFunction>> m_overlayFunctions;
++    RecompiledFunction findOverlayFunction(uint32_t address) const;
+     GifArbiter m_gifArbiter;
+     GS m_gs;
+     std::unique_ptr<PS2IopHostAdapter> m_iopHost;
+diff --git a/ps2xRuntime/include/runtime/ps2_memory.h b/ps2xRuntime/include/runtime/ps2_memory.h
+index 84db0cf..bfa9b03 100644
+--- a/ps2xRuntime/include/runtime/ps2_memory.h
++++ b/ps2xRuntime/include/runtime/ps2_memory.h
+@@ -274,6 +274,7 @@ public:
+ 
+     // Memory access methods
+     uint8_t *getRDRAM() { return m_rdram; }
++    const uint8_t *getRDRAM() const { return m_rdram; }
+     uint8_t *getScratchpad() { return m_scratchpad; }
+     uint8_t *getIOPRAM() { return iop_ram; }
+     uint64_t dmaStartCount() const { return m_dmaStartCount.load(std::memory_order_relaxed); }
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index d195a97..2abf29a 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1113,7 +1113,77 @@ bool PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
+ bool PS2Runtime::hasFunction(uint32_t address) const
+ {
+     uint32_t slot = 0u;
+-    return generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr;
++    if (generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr)
++    {
++        return true;
++    }
++    return findOverlayFunction(address) != nullptr;
++}
++
++bool PS2Runtime::addOverlayRegion(uint32_t base, uint32_t size, uint32_t idAddress)
++{
++    const uint64_t end = static_cast<uint64_t>(base) + size;
++    const bool idInside = idAddress >= base && static_cast<uint64_t>(idAddress) + sizeof(uint32_t) <= end;
++    if ((base & 3u) != 0u || (idAddress & 3u) != 0u || size == 0u || end > 0x100000000ull || !idInside)
++    {
++        return false;
++    }
++    for (const OverlayRegion &existing : m_overlayRegions)
++    {
++        const uint64_t existingEnd = static_cast<uint64_t>(existing.base) + existing.size;
++        if (base < existingEnd && existing.base < end)
++        {
++            return false;
++        }
++    }
++    m_overlayRegions.push_back(OverlayRegion{base, size, idAddress});
++    return true;
++}
++
++bool PS2Runtime::registerOverlayFunction(uint32_t overlayId, uint32_t address, RecompiledFunction func)
++{
++    if ((address & 3u) != 0u || func == nullptr)
++    {
++        return false;
++    }
++    for (const OverlayRegion &region : m_overlayRegions)
++    {
++        if (address >= region.base && address - region.base < region.size)
++        {
++            return m_overlayFunctions[overlayId].emplace(address, func).second;
++        }
++    }
++    return false;
++}
++
++PS2Runtime::RecompiledFunction PS2Runtime::findOverlayFunction(uint32_t address) const
++{
++    if ((address & 3u) != 0u)
++    {
++        return nullptr;
++    }
++    for (const OverlayRegion &region : m_overlayRegions)
++    {
++        if (address < region.base || address - region.base >= region.size)
++        {
++            continue;
++        }
++        const uint8_t *id = getConstMemPtr(m_memory.getRDRAM(), region.idAddress);
++        if (id == nullptr)
++        {
++            return nullptr;
++        }
++        uint32_t loaded = 0u;
++        std::memcpy(&loaded, id, sizeof(loaded));
++        const auto overlay = m_overlayFunctions.find(loaded);
++        if (overlay == m_overlayFunctions.end())
++        {
++            return nullptr;
++        }
++        const auto function = overlay->second.find(address);
++        return function == overlay->second.end() ? nullptr : function->second;
++    }
++    return nullptr;
+ }
+ 
+ const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
+@@ -1149,6 +1219,11 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
+         }
+     }
+ 
++    if (RecompiledFunction overlayFunction = findOverlayFunction(address))
++    {
++        return overlayFunction;
++    }
++
+     std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address
+               << " tableBase=0x" << g_ps2RecompiledFunctionTableBase
+               << " tableEnd=0x" << g_ps2RecompiledFunctionTableEnd

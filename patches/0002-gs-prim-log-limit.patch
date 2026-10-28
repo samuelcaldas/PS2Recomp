@@ -1,0 +1,49 @@
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -10,6 +10,7 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <fstream>
+ #include <iostream>
+@@ -708,13 +709,26 @@
+     return result;
+ }
+ 
++namespace
++{
++    // PS2X_GS_PRIM_LOG_LIMIT raises how many primitives the aggressive log describes (default 64).
++    uint32_t primitiveLogLimit()
++    {
++        static const uint32_t limit = []() -> uint32_t {
++            const char *text = std::getenv("PS2X_GS_PRIM_LOG_LIMIT");
++            return text != nullptr ? static_cast<uint32_t>(std::strtoul(text, nullptr, 10)) : 64u;
++        }();
++        return limit;
++    }
++}
++
+ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
+ {
+     const GSDrawState &state = batch.state;
+     const auto &ctx = state.context;
+     PS2_IF_AGRESSIVE_LOGS({
+         const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
+-        if (primitiveIndex < 64u)
++        if (primitiveIndex < primitiveLogLimit())
+         {
+             std::cout << "[gs:prim] idx=" << primitiveIndex
+                       << " type=" << static_cast<uint32_t>(state.prim.type)
+@@ -755,6 +769,10 @@
+                       << " v0=(" << batch.vertices[0].x << "," << batch.vertices[0].y << ")"
+                       << " uv0=(" << (batch.vertices[0].u >> 4) << "," << (batch.vertices[0].v >> 4) << ")"
+                       << " stq0=(" << batch.vertices[0].s << "," << batch.vertices[0].t << "," << batch.vertices[0].q << ")"
++                      << " z0=" << batch.vertices[0].z
++                      << " zbuf=(zbp=" << ctx.zbuf.zbp << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.zbuf.psm)
++                      << std::dec << " zmsk=" << static_cast<uint32_t>(ctx.zbuf.zmask ? 1u : 0u) << ")"
++                      << " fbmsk=0x" << std::hex << ctx.frame.fbmsk << std::dec
+                       << " v1=(" << batch.vertices[1].x << "," << batch.vertices[1].y << ")"
+                       << " uv1=(" << (batch.vertices[1].u >> 4) << "," << (batch.vertices[1].v >> 4) << ")"
+                       << " stq1=(" << batch.vertices[1].s << "," << batch.vertices[1].t << "," << batch.vertices[1].q << ")"

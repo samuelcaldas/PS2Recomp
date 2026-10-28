@@ -1,0 +1,50 @@
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -336,6 +336,9 @@ public:
+                              DebugUiCallback shutdownCallback,
+                              void *userData);
+
++    using PresentationCallback = void (*)(PS2Runtime &runtime, void *userData);
++    void setPresentationCallback(PresentationCallback callback, void *userData);
++
+     using RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
+
+     enum class GuestBranchKind
+@@ -574,6 +577,9 @@ private:
+     void *m_debugUiUserData = nullptr;
+     bool m_debugUiInitialized = false;
+
++    PresentationCallback m_presentationCallback = nullptr;
++    void *m_presentationUserData = nullptr;
++
+ public:
+     std::atomic<uint32_t> m_debugPc{0};
+     std::atomic<uint32_t> m_debugRa{0};
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -525,6 +525,12 @@ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
+     m_debugUiUserData = userData;
+ }
+
++void PS2Runtime::setPresentationCallback(PresentationCallback callback, void *userData)
++{
++    m_presentationCallback = callback;
++    m_presentationUserData = userData;
++}
++
+ PS2Runtime::~PS2Runtime()
+ {
+     try
+@@ -2694,6 +2700,10 @@ void PS2Runtime::run()
+             dstWidth,
+             dstHeight};
+         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
++        if (m_presentationCallback)
++        {
++            m_presentationCallback(*this, m_presentationUserData);
++        }
+         if (m_debugUiInitialized && m_debugUiDrawCallback)
+         {
+             m_debugUiDrawCallback(*this, m_debugUiUserData);
