@@ -12,6 +12,7 @@ option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
 
 option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" ON)
 option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" ON)
+option(PS2X_ENABLE_FUNCTION_LOG_TRACKER "Enable function log tracking with aggressive logs" ON)
 option(PS2X_ENABLE_IOP_RPC_TRACE "Log unhandled IOP/SIF RPC trace suggestions" ON)
 option(PS2X_STRICT_RETURN_DIAGNOSTICS "Route generated JR $ra returns through runtime branch diagnostics" OFF)
 option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
@@ -405,6 +406,11 @@ endif()
 if(PS2X_ENABLE_AGRESSIVE_LOGS)
     target_compile_definitions(ps2_runtime PUBLIC
         AGRESSIVE_LOGS=1
+    )
+endif()
+
+if(PS2X_ENABLE_AGRESSIVE_LOGS AND PS2X_ENABLE_FUNCTION_LOG_TRACKER)
+    target_compile_definitions(ps2_runtime PUBLIC
         PS2_FUNCTION_LOG_TRACKER=1
     )
 endif()

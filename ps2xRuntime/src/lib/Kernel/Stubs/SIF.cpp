@@ -1,13 +1,19 @@
 #include "Common.h"
 #include "SIF.h"
+#include "SifCommandEndpoint.h"
+#include "SifLoadfileServer.h"
+#include "SifCdvdServer.h"
 #include "../Syscalls/RPC.h"
 #include "../../ps2_iop_transport.h"
 #include "runtime/ps2_address.h"
 #include "runtime/ee_scheduler.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <limits>
+#include <optional>
+#include <unordered_map>
 #include <vector>
 
 namespace ps2_stubs
@@ -80,11 +86,46 @@ namespace ps2_stubs
         uint32_t g_sifGetRegLogCount = 0u;
         uint32_t g_sifSetRegLogCount = 0u;
 
+        // IOP side of the packet protocol used by guest-code sifcmd/sifrpc libraries. Its
+        // buffers live in IOP RAM, which only exists once a runtime is attached.
+        ps2_sif::SifCommandEndpoint g_sifEndpoint;
+        ps2_sif::SifCdvdServer g_sifCdvdServer;
+        uint32_t g_iopCommandBuffer = 0u;
+        uint32_t g_iopRpcBuffer = 0u;
+        // Set by a RESET packet; the reboot completes when the EE next polls SMFLAG.
+        bool g_iopRebootPending = false;
+        bool g_sifDeliveryScheduled = false;
+        struct RpcDiagnosticRecord
+        {
+            uint64_t sequence = 0u;
+            uint32_t client = 0u;
+            uint32_t packet = 0u;
+            uint32_t rpcId = 0u;
+            std::array<uint32_t, 14> request{};
+        };
+        uint64_t g_rpcDiagnosticSequence = 0u;
+        std::unordered_map<uint64_t, std::deque<RpcDiagnosticRecord>> g_rpcDiagnostics;
+
+        uint64_t rpcDiagnosticKey(uint32_t client, uint32_t rpcId)
+        {
+            return (static_cast<uint64_t>(client) << 32u) | rpcId;
+        }
+
         constexpr uint32_t kSifRegBootStatus = 0x4u;
         constexpr uint32_t kSifRegMainAddr = 0x80000000u;
         constexpr uint32_t kSifRegSubAddr = 0x80000001u;
         constexpr uint32_t kSifRegMsCom = 0x80000002u;
         constexpr uint32_t kSifBootReadyMask = 0x00020000u;
+        // SMFLAG after an IOP boot: command library ready (CMDINIT) and boot finished (BOOTEND).
+        constexpr uint32_t kSifRebootedStatus = 0x00060000u;
+        // SIF_REG_SUBADDR: where the IOP sifcmd module receives EE command packets.
+        constexpr uint32_t kSifRegIopCommandBuffer = 0x2u;
+        constexpr uint32_t kIopCommandBufferSize = 0x100u;
+        constexpr uint32_t kIopRpcBufferSize = 0x20000u;
+        constexpr uint32_t kDmacCauseSif0 = 5u;
+        // IOP turnaround before a reply reaches the EE (~55 us). Without it, a thread that
+        // polls an IOP server wakes instantly and starves lower-priority threads.
+        constexpr uint64_t kSifReplyLatencyCycles = 0x4000u;
 
         void seedDefaultSifRegsLocked()
         {
@@ -101,6 +142,14 @@ namespace ps2_stubs
             g_sifRegs[kSifRegMainAddr] = 0u;
             g_sifRegs[kSifRegSubAddr] = 0u;
             g_sifRegs[kSifRegMsCom] = 0u;
+            g_sifEndpoint.reset();
+            g_sifCdvdServer = {};
+            g_iopCommandBuffer = 0u;
+            g_iopRpcBuffer = 0u;
+            g_iopRebootPending = false;
+            g_sifDeliveryScheduled = false;
+            g_rpcDiagnostics.clear();
+            g_rpcDiagnosticSequence = 0u;
         }
 
         bool shouldTraceSifReg(uint32_t reg)
@@ -217,6 +266,434 @@ namespace ps2_stubs
                 *destination = bytes[i];
             }
             return true;
+        }
+
+        // Allocates the IOP command and RPC buffers on first use and publishes the command
+        // buffer in SIF_REG_SUBADDR, as the IOP sifcmd module does at boot.
+        void ensureIopBuffersLocked(PS2Runtime *runtime)
+        {
+            if (g_iopCommandBuffer != 0u || !runtime)
+                return;
+            g_iopCommandBuffer = runtime->allocateIopMemory(kIopCommandBufferSize, 64u);
+            g_iopRpcBuffer = runtime->allocateIopMemory(kIopRpcBufferSize, 64u);
+            g_sifRegs[kSifRegIopCommandBuffer] = g_iopCommandBuffer;
+            g_sifEndpoint.setRpcBuffer(g_iopRpcBuffer);
+        }
+
+        void serveLoadfile(uint8_t *rdram, PS2Runtime *runtime, const ps2_sif::SifCommandEndpoint::RpcCall &call)
+        {
+            std::vector<uint8_t> send(call.sendSize);
+            if (!readEeRange(rdram, call.sendAddress, send.data(), call.sendSize))
+                send.clear();
+            ps2_sif::SifLoadfileServer::Modules modules;
+            modules.load = [runtime](const std::string &path, const std::vector<uint8_t> &arguments)
+            {
+                const auto loaded = runtime->loadIopModule(path, arguments.empty() ? nullptr : arguments.data(),
+                                                           static_cast<uint32_t>(arguments.size()));
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[sif:loadfile] path=" << path << " handled=" << loaded.handled
+                              << " id=" << loaded.moduleId << std::endl;
+                });
+                return loaded.handled && loaded.moduleId > 0 ? loaded.moduleId : -1;
+            };
+            const std::vector<uint32_t> result = ps2_sif::SifLoadfileServer::invoke(call.function, send, modules);
+            const uint32_t size = std::min<uint32_t>(call.receiveSize, static_cast<uint32_t>(result.size() * 4u));
+            (void)writeEeRange(rdram, call.receiveAddress, result.data(), size);
+        }
+
+        // Size of the mounted disc: the image file, or the extracted tree under the CD root.
+        uint64_t virtualDiscBytes()
+        {
+            static std::filesystem::path measuredPath;
+            static uint64_t measuredBytes = 0u;
+            const std::filesystem::path image = getCdImagePath();
+            const std::filesystem::path source = image.empty() ? getCdRootPath() : image;
+            if (source == measuredPath)
+                return measuredBytes;
+            std::error_code error;
+            uint64_t total = 0u;
+            if (std::filesystem::is_regular_file(source, error))
+                total = std::filesystem::file_size(source, error);
+            for (auto it = std::filesystem::recursive_directory_iterator(source, error);
+                 !error && it != std::filesystem::recursive_directory_iterator(); it.increment(error))
+            {
+                if (it->is_regular_file(error))
+                    total += it->file_size(error);
+            }
+            measuredPath = source;
+            measuredBytes = total;
+            return total;
+        }
+
+        ps2_sif::SifCdvdServer::Disc virtualDisc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            ps2_sif::SifCdvdServer::Disc disc;
+            disc.searchFile = [rdram, ctx, runtime](uint32_t fileAddress, uint32_t pathAddress)
+            {
+                R5900Context scratch = *ctx;
+                SET_GPR_U32(&scratch, 4, fileAddress);
+                SET_GPR_U32(&scratch, 5, pathAddress);
+                ps2_stubs::sceCdSearchFile(rdram, &scratch, runtime);
+                return static_cast<int32_t>(getRegU32(&scratch, 2));
+            };
+            disc.readToEe = [rdram](uint32_t lbn, uint32_t count, uint32_t eeDestination)
+            {
+                const uint64_t bytes = std::min<uint64_t>(static_cast<uint64_t>(count) * kCdSectorSize,
+                                                          PS2_RAM_SIZE - (eeDestination & PS2_RAM_MASK));
+                ps2TraceGuestRangeWrite(rdram, eeDestination, static_cast<uint32_t>(bytes), "SIF CDVD read", nullptr);
+                const bool ok = readCdSectors(lbn, count, rdram + (eeDestination & PS2_RAM_MASK), static_cast<size_t>(bytes));
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[sif:cdread] lbn=0x" << std::hex << lbn << " count=0x" << count << " dst=0x"
+                              << eeDestination << " bytes=0x" << bytes << std::dec << " ok=" << ok << std::endl;
+                });
+                return ok;
+            };
+            disc.diskType = []()
+            {
+                return ps2_sif::SifCdvdServer::diskTypeForSize(virtualDiscBytes());
+            };
+            disc.readToIop = [runtime](uint32_t lbn, uint32_t count, uint32_t iopDestination)
+            {
+                std::vector<uint8_t> data(static_cast<size_t>(count) * kCdSectorSize);
+                return readCdSectors(lbn, count, data.data(), data.size()) &&
+                       runtime->writeIopMemory(iopDestination, data.data(), data.size());
+            };
+            return disc;
+        }
+
+        void serveCdvd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, const ps2_sif::SifCommandEndpoint::RpcCall &call)
+        {
+            ps2_sif::SifCdvdServer::Request request;
+            request.sid = call.sid;
+            request.function = call.function;
+            request.sendAddress = call.sendAddress;
+            request.send.resize(call.sendSize);
+            if (!readEeRange(rdram, call.sendAddress, request.send.data(), call.sendSize))
+                request.send.clear();
+            const std::vector<uint32_t> result = g_sifCdvdServer.invoke(request, virtualDisc(rdram, ctx, runtime));
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[sif:cdvd] sid=0x" << std::hex << call.sid << " fn=0x" << call.function
+                          << " send=0x" << call.sendSize << " result=0x" << (result.empty() ? 0u : result[0])
+                          << std::dec << std::endl;
+            });
+            const uint32_t size = std::min<uint32_t>(call.receiveSize, static_cast<uint32_t>(result.size() * 4u));
+            (void)writeEeRange(rdram, call.receiveAddress, result.data(), size);
+            // On real PS2, async NCmds complete via a CDVD DMA interrupt that:
+            //   1. Fills a slot in D_4F1400 (the EE-side NCmd completion ring, 4 × 0x38-byte entries):
+            //      slot[0x00] = 1 (occupied), slot[0x04] = 0 (pending), slot[0x14] = fn_code
+            //   2. Signals the EE sema at D_4ED300+0x48 (= 0x4ED348).
+            // Thread 7 (func_0012B648) wakes, reads the slot via func_0012BE70, dispatches the
+            // command, and eventually unblocks the loading thread (sema 27).
+            // The HLE is synchronous. We replicate both steps here.
+            if (ps2_sif::SifCdvdServer::isAsyncNCommand(call.function) && runtime)
+            {
+                // Step 1: write a completion slot into D_4F1400 (EE RAM).
+                // Scan for a free slot (slot[0] == 0). Slot stride = 0x38, 4 slots.
+                constexpr uint32_t kNcmdRingBase = 0x4F1400u;
+                constexpr uint32_t kSlotStride   = 0x38u;
+                constexpr uint32_t kSlotCount    = 4u;
+                uint32_t slotAddr = 0u;
+                for (uint32_t i = 0u; i < kSlotCount; ++i)
+                {
+                    const uint32_t addr = kNcmdRingBase + i * kSlotStride;
+                    uint32_t busy = 0u;
+                    (void)readEeRange(rdram, addr, &busy, sizeof(busy));
+                    if (busy == 0u) { slotAddr = addr; break; }
+                }
+                if (slotAddr)
+                {
+                    // slot[+0x00] = 1 (busy/occupied), slot[+0x04] = 0 (not claimed),
+                    // slot[+0x14] = fn_code (thread 7 reads this to dispatch the command).
+                    const uint32_t one  = 1u;
+                    const uint32_t zero = 0u;
+                    const uint32_t fn   = call.function;
+                    (void)writeEeRange(rdram, slotAddr + 0x00u, &one,  sizeof(one));
+                    (void)writeEeRange(rdram, slotAddr + 0x04u, &zero, sizeof(zero));
+                    (void)writeEeRange(rdram, slotAddr + 0x14u, &fn,   sizeof(fn));
+                    PS2_IF_AGRESSIVE_LOGS({
+                        std::cerr << "[sif:cdvd] NCmd slot at 0x" << std::hex << slotAddr
+                                  << " fn=0x" << call.function << std::dec << '\n';
+                    });
+                }
+                else
+                {
+                    std::cerr << "[sif:cdvd] WARNING: all NCmd slots busy, skipping slot write for fn=0x"
+                              << std::hex << call.function << std::dec << '\n';
+                }
+                // Step 2: signal the EE NCmd completion sema (D_4ED348).
+                // If sema not yet created (CDVD init races with GetToc), defer and drain later.
+                uint32_t ncmd_sema = 0u;
+                (void)readEeRange(rdram, 0x4ED348u, &ncmd_sema, sizeof(ncmd_sema));
+                if (static_cast<int32_t>(ncmd_sema) > 0)
+                {
+                    const uint32_t pending = ps2_sif::SifCdvdServer::s_pendingNcmdSignals.exchange(0u, std::memory_order_relaxed);
+                    const uint32_t total = pending + 1u;
+                    PS2_IF_AGRESSIVE_LOGS({
+                        std::cerr << "[sif:cdvd] async NCmd fn=0x" << std::hex << call.function
+                                  << " signaling ncmd_sema=" << std::dec << ncmd_sema
+                                  << " x" << total << " (pending=" << pending << ")" << std::endl;
+                    });
+                    for (uint32_t i = 0u; i < total; ++i)
+                        (void)runtime->eeScheduler().signalSemaphore(static_cast<int>(ncmd_sema), true);
+                }
+                else
+                {
+                    ps2_sif::SifCdvdServer::s_pendingNcmdSignals.fetch_add(1u, std::memory_order_relaxed);
+                    PS2_IF_AGRESSIVE_LOGS({
+                        std::cerr << "[sif:cdvd] async NCmd fn=0x" << std::hex << call.function
+                                  << " deferred (sema not created yet), pending="
+                                  << std::dec << ps2_sif::SifCdvdServer::s_pendingNcmdSignals.load() << std::endl;
+                    });
+                }
+            }
+        }
+
+        void callIopRpc(uint8_t *rdram,
+                        R5900Context *ctx,
+                        PS2Runtime *runtime,
+                        const ps2_sif::SifCommandEndpoint::RpcCall &call)
+        {
+            if (call.sid == ps2_sif::SifLoadfileServer::kSid)
+            {
+                serveLoadfile(rdram, runtime, call);
+                return;
+            }
+            if (ps2_sif::SifCdvdServer::serves(call.sid))
+            {
+                serveCdvd(rdram, ctx, runtime, call);
+                return;
+            }
+            ps2x::iop::RpcRequest request{};
+            request.clientAddress = call.clientAddress;
+            request.sid = call.sid;
+            request.function = call.function;
+            request.mode = call.mode;
+            request.send = {call.sendAddress, call.sendSize};
+            request.receive = {call.receiveAddress, call.receiveSize};
+            const ps2x::iop::RpcResult result = PS2IopTransport::handleRpc(runtime, rdram, ctx, request);
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[sif:call] sid=0x" << std::hex << call.sid << " fn=0x" << call.function
+                          << " send=0x" << call.sendAddress << "+0x" << call.sendSize
+                          << " recv=0x" << call.receiveAddress << "+0x" << call.receiveSize
+                          << " handled=" << std::dec << result.handled;
+                uint32_t words[4] = {};
+                if (readEeRange(rdram, call.sendAddress, words, std::min<uint32_t>(16u, call.sendSize)))
+                    std::cerr << std::hex << " sendw=" << words[0] << "," << words[1] << "," << words[2] << "," << words[3];
+                std::memset(words, 0, sizeof(words));
+                const uint32_t replyAddress = result.resultAddress != 0u ? result.resultAddress : call.receiveAddress;
+                if (readEeRange(rdram, replyAddress, words, std::min<uint32_t>(16u, call.receiveSize)))
+                    std::cerr << " recvw=" << words[0] << "," << words[1] << "," << words[2] << "," << words[3];
+                std::cerr << std::dec << std::endl;
+            });
+            if (!result.handled || call.receiveSize == 0u || result.resultAddress == 0u ||
+                result.resultAddress == call.receiveAddress)
+                return;
+            std::vector<uint8_t> data(call.receiveSize);
+            if (readEeRange(rdram, result.resultAddress, data.data(), call.receiveSize))
+                (void)writeEeRange(rdram, call.receiveAddress, data.data(), call.receiveSize);
+        }
+
+        ps2_sif::SifCommandEndpoint::Services endpointServices(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            ps2_sif::SifCommandEndpoint::Services services;
+            services.canBind = [runtime](uint32_t sid)
+            {
+                const bool bound = sid == ps2_sif::SifLoadfileServer::kSid || ps2_sif::SifCdvdServer::serves(sid) ||
+                                   PS2IopTransport::canBindRpc(runtime, sid);
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[sif:bind] sid=0x" << std::hex << sid << std::dec << " bound=" << bound << std::endl;
+                });
+                return bound;
+            };
+            services.call = [rdram, ctx, runtime](const ps2_sif::SifCommandEndpoint::RpcCall &call)
+            {
+                callIopRpc(rdram, ctx, runtime, call);
+            };
+            services.rebootIop = []()
+            {
+                std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                g_iopRebootPending = true;
+            };
+            services.copyIopToEe = [rdram, runtime](uint32_t eeDestination, uint32_t iopSource, uint32_t size)
+            {
+                std::vector<uint8_t> data(size);
+                if (runtime && runtime->readIopMemory(iopSource, data.data(), size))
+                    (void)writeEeRange(rdram, eeDestination, data.data(), size);
+            };
+            return services;
+        }
+
+        bool scheduleSifReply(uint8_t *rdram, PS2Runtime *runtime);
+
+        // Writes the next IOP reply into the EE receive buffer and raises the SIF0 DMAC
+        // interrupt. Returns false when no reply was ready. Runs on the executor thread.
+        bool deliverSifReply(uint8_t *rdram, PS2Runtime *runtime)
+        {
+            if (!runtime)
+                return false;
+            const std::optional<ps2_sif::SifCommandEndpoint::Reply> reply = g_sifEndpoint.nextReply();
+            if (!reply)
+                return false;
+            const uint32_t size = static_cast<uint32_t>(reply->bytes.size());
+            PS2_IF_AGRESSIVE_LOGS({
+                uint32_t replyWords[16] = {};
+                uint32_t destinationBefore[4] = {};
+                std::memcpy(replyWords, reply->bytes.data(), std::min<size_t>(sizeof(replyWords), reply->bytes.size()));
+                for (uint32_t index = 0u; index < 4u; ++index)
+                {
+                    const auto *word = reinterpret_cast<const uint32_t *>(getMemPtr(rdram, reply->eeAddress + index * 4u));
+                    if (word)
+                        destinationBefore[index] = *word;
+                }
+                std::cerr << "[sif:reply] cid=0x" << std::hex << replyWords[2] << " to=0x" << reply->eeAddress
+                          << " size=0x" << size << " words=";
+                for (size_t index = 0u; index < std::min<size_t>(16u, reply->bytes.size() / sizeof(uint32_t)); ++index)
+                    std::cerr << (index == 0u ? "" : ",") << "0x" << replyWords[index];
+                std::cerr << " dst-before=" << destinationBefore[0] << "," << destinationBefore[1]
+                          << "," << destinationBefore[2] << "," << destinationBefore[3] << std::dec << std::endl;
+            });
+            if (reply->eeAddress >= PS2_RAM_SIZE || size > PS2_RAM_SIZE - reply->eeAddress ||
+                !writeEeRange(rdram, reply->eeAddress, reply->bytes.data(), size))
+            {
+                std::cerr << "[sif:reply] failed destination=0x" << std::hex << reply->eeAddress
+                          << std::dec << " size=" << size << std::endl;
+                g_sifEndpoint.acknowledge();
+                if (g_sifEndpoint.hasDeliverableReply())
+                    (void)scheduleSifReply(rdram, runtime);
+                return false;
+            }
+            PS2_IF_AGRESSIVE_LOGS({
+                uint32_t destinationAfter[4] = {};
+                for (uint32_t index = 0u; index < 4u; ++index)
+                {
+                    const auto *word = reinterpret_cast<const uint32_t *>(getMemPtr(rdram, reply->eeAddress + index * 4u));
+                    if (word)
+                        destinationAfter[index] = *word;
+                }
+                std::cerr << "[sif:reply-written] to=0x" << std::hex << reply->eeAddress
+                          << " words=" << destinationAfter[0] << "," << destinationAfter[1] << ","
+                          << destinationAfter[2] << "," << destinationAfter[3] << std::dec << std::endl;
+            });
+            bool diagnosticDispatched = false;
+            PS2_IF_AGRESSIVE_LOGS((diagnosticDispatched = [&]() {
+                uint32_t words[16] = {};
+                if (size >= sizeof(uint32_t) * 9u)
+                {
+                    std::memcpy(words, reply->bytes.data(), std::min<size_t>(sizeof(words), reply->bytes.size()));
+                    if (words[2] == 0x80000008u && words[8] == 0x8000000Au)
+                    {
+                        const uint32_t client = words[7];
+                        const uint32_t rpcId = words[6];
+                        const uint32_t packet = words[5] & 0x01FFFFFFu;
+                        auto found = g_rpcDiagnostics.find(rpcDiagnosticKey(client, rpcId));
+                        if (found != g_rpcDiagnostics.end() && !found->second.empty())
+                        {
+                            RpcDiagnosticRecord record = found->second.front();
+                            found->second.pop_front();
+                            auto snapshot = [rdram, record, words]()
+                            {
+                                uint32_t clientWords[8] = {};
+                                if (record.client != 0u && readEeRange(rdram, record.client, clientWords, sizeof(clientWords)))
+                                    std::cerr << "[sif:rpc-client-before] seq=" << record.sequence << " client=0x" << std::hex << record.client
+                                              << " packet=0x" << record.packet << " rpcid=0x" << record.rpcId << " hdr="
+                                              << clientWords[0] << "," << clientWords[1] << "," << clientWords[2] << "," << clientWords[3]
+                                              << " req=" << record.request[0] << "," << record.request[4] << "," << record.request[5]
+                                              << " reply=" << words[0] << "," << words[4] << "," << words[5] << std::dec << std::endl;
+                                else
+                                    std::cerr << "[sif:rpc-client-before] seq=" << record.sequence << " client=0x" << std::hex << record.client << " unreadable" << std::dec << std::endl;
+                            };
+                            snapshot();
+                            runtime->eeScheduler().dispatchIrq(true, kDmacCauseSif0, [rdram, record]()
+                            {
+                                uint32_t clientWords[8] = {};
+                                if (record.client != 0u && readEeRange(rdram, record.client, clientWords, sizeof(clientWords)))
+                                    std::cerr << "[sif:rpc-client-after-handler] seq=" << record.sequence << " client=0x" << std::hex << record.client
+                                              << " packet=0x" << record.packet << " rpcid=0x" << record.rpcId << " hdr="
+                                              << clientWords[0] << "," << clientWords[1] << "," << clientWords[2] << "," << clientWords[3]
+                                              << " handler-complete=1" << std::dec << std::endl;
+                                else
+                                    std::cerr << "[sif:rpc-client-after-handler] seq=" << record.sequence << " client=0x" << std::hex << record.client << " unreadable handler-complete=1" << std::dec << std::endl;
+                            });
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }()));
+            if (!diagnosticDispatched)
+                ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, kDmacCauseSif0);
+            return true;
+        }
+
+        // Delivers the next reply after the IOP latency when guest code is running; direct
+        // stub calls (no EE time) deliver at once. Returns true if a reply was or will be sent.
+        bool scheduleSifReply(uint8_t *rdram, PS2Runtime *runtime)
+        {
+            if (!runtime || !runtime->eeScheduler().isExecutingGuest())
+                return deliverSifReply(rdram, runtime);
+            if (g_sifDeliveryScheduled)
+                return true;
+            if (!g_sifEndpoint.hasDeliverableReply())
+                return false;
+            g_sifDeliveryScheduled = true;
+            runtime->eeScheduler().scheduleHostCallback(kSifReplyLatencyCycles, [rdram, runtime]()
+            {
+                g_sifDeliveryScheduled = false;
+                (void)deliverSifReply(rdram, runtime);
+            });
+            return true;
+        }
+
+        // Hands EE packets DMAed into the IOP command buffer to the endpoint and remembers
+        // the source of RPC arguments DMAed into the RPC buffer.
+        void forwardToEndpoint(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, const Ps2SifDmaTransfer &xfer)
+        {
+            uint32_t commandBuffer = 0u;
+            uint32_t rpcBuffer = 0u;
+            {
+                std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+                ensureIopBuffersLocked(runtime);
+                commandBuffer = g_iopCommandBuffer;
+                rpcBuffer = g_iopRpcBuffer;
+            }
+            if (rpcBuffer != 0u && xfer.dest == rpcBuffer)
+            {
+                g_sifEndpoint.noteRpcData(xfer.src);
+                return;
+            }
+            if (commandBuffer == 0u || xfer.dest != commandBuffer)
+                return;
+            std::vector<uint8_t> packet(static_cast<uint32_t>(xfer.size));
+            if (!readEeRange(rdram, xfer.src, packet.data(), static_cast<uint32_t>(packet.size())))
+                return;
+            PS2_IF_AGRESSIVE_LOGS({
+                uint32_t words[14] = {};
+                std::memcpy(words, packet.data(), std::min<size_t>(sizeof(words), packet.size()));
+                std::cerr << "[sif:packet] cid=0x" << std::hex << words[2] << " opt=0x" << words[3]
+                          << " size=0x" << packet.size() << " words=";
+                for (size_t index = 0u; index < std::min<size_t>(14u, packet.size() / sizeof(uint32_t)); ++index)
+                    std::cerr << (index == 0u ? "" : ",") << "0x" << words[index];
+                std::cerr << std::dec << std::endl;
+            });
+            if (packet.size() >= 56u)
+            {
+                uint32_t words[14] = {};
+                std::memcpy(words, packet.data(), sizeof(words));
+                if (words[2] == 0x8000000Au)
+                {
+                    RpcDiagnosticRecord record{};
+                    record.sequence = ++g_rpcDiagnosticSequence;
+                    record.client = words[7];
+                    record.packet = words[5] & 0x01FFFFFFu;
+                    record.rpcId = words[6];
+                    std::copy(std::begin(words), std::end(words), record.request.begin());
+                    auto &records = g_rpcDiagnostics[rpcDiagnosticKey(record.client, record.rpcId)];
+                    if (records.size() == 16u)
+                        records.pop_front();
+                    records.push_back(record);
+                }
+            }
+            g_sifEndpoint.receive(packet, endpointServices(rdram, ctx, runtime));
         }
     }
 
@@ -468,6 +945,13 @@ namespace ps2_stubs
         bool shouldLog = false;
         {
             std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+            if (reg == kSifRegIopCommandBuffer)
+                ensureIopBuffersLocked(runtime);
+            if (reg == kSifRegBootStatus && g_iopRebootPending)
+            {
+                g_iopRebootPending = false;
+                g_sifRegs[kSifRegBootStatus] |= kSifRebootedStatus;
+            }
             auto it = g_sifRegs.find(reg);
             if (it != g_sifRegs.end())
             {
@@ -621,8 +1105,10 @@ namespace ps2_stubs
 
     void sceSifSetDChain(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        (void)rdram;
-        (void)runtime;
+        // The EE SIF0 handler re-arms the channel after copying the received packet out,
+        // so the next queued IOP reply can be delivered.
+        g_sifEndpoint.acknowledge();
+        (void)scheduleSifReply(rdram, runtime);
         setReturnS32(ctx, 0);
     }
 
@@ -750,7 +1236,14 @@ namespace ps2_stubs
             return;
         }
 
-        ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, 5u);
+        for (uint32_t i = 0; i < pendingCount; ++i)
+        {
+            forwardToEndpoint(rdram, ctx, runtime, pending[i]);
+        }
+        if (!scheduleSifReply(rdram, runtime))
+        {
+            ps2_syscalls::dispatchDmacHandlersForCause(rdram, runtime, kDmacCauseSif0);
+        }
 
         setReturnS32(ctx, static_cast<int32_t>(allocateSifDmaTransferId()));
     }

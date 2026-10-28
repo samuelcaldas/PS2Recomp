@@ -227,7 +227,8 @@ namespace ps2x::iop::detail
                 cpu.gpr[2] = 1u;
                 return true;
 
-            case 6: // sceCdRead
+            case 6:  // sceCdRead
+            case 22: // sceCdRead0 (alternate entry used by cdvdman v1.01 IOP modules)
                 if (readSectors(a0, a1, a2))
                 {
                     signalCommandComplete();

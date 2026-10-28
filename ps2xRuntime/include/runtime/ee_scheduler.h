@@ -236,6 +236,7 @@ enum class EeEventType : uint8_t
     Dmac,
     ExternalWake,
     Alarm,
+    HostCallback,
 };
 
 struct EeEvent
@@ -279,6 +280,9 @@ public:
     void requestStop();
     void postEvent(EeEvent event);
     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
+    // True from a checkpoint that asked the host call chain to unwind until the next guest dispatch.
+    // A callee that comes back with pc == its own entry is then preempted, not returned.
+    [[nodiscard]] bool unwindingForCheckpoint() const noexcept { return m_unwindingForCheckpoint; }
     void accountCycles(uint32_t cycles) noexcept;
     [[nodiscard]] bool isExecutingGuest() const noexcept;
 
@@ -314,6 +318,9 @@ public:
     void waitEventFlag(int id, uint32_t bits, uint32_t mode, uint32_t resultAddress);
 
     int setAlarm(uint16_t ticks, uint32_t handler, uint32_t argument, uint32_t gp, uint32_t sp);
+    // Runs callback on the executor once delayCycles of EE time (and the matching host
+    // time) have passed. Models latency of devices outside the EE, such as the IOP.
+    void scheduleHostCallback(uint64_t delayCycles, std::function<void()> callback);
     int cancelAlarm(int id);
     void queueInvocation(GuestInvocation invocation);
     [[noreturn]] void invokeCurrent(GuestInvocation invocation);
@@ -331,7 +338,7 @@ public:
     int removeIrqHandler(bool dmac, uint32_t cause, int id);
     int setIrqHandlerEnabled(bool dmac, int id, bool enabled);
     int setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled);
-    void dispatchIrq(bool dmac, uint32_t cause);
+    void dispatchIrq(bool dmac, uint32_t cause, std::function<void()> afterHandlers = {});
     void setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress);
     [[nodiscard]] uint64_t currentVSyncTick() const noexcept;
     uint32_t setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp);
@@ -405,6 +412,8 @@ private:
     std::unordered_map<int, EeSemaphore> m_semaphores;
     std::unordered_map<int, EeEventFlag> m_eventFlags;
     std::unordered_map<int, EeAlarm> m_alarms;
+    std::unordered_map<uint32_t, std::function<void()>> m_hostCallbacks;
+    uint32_t m_nextHostCallbackId = 1u;
     std::unordered_map<int, EeIrqHandler> m_intcHandlers;
     std::unordered_map<int, EeIrqHandler> m_dmacHandlers;
     int m_nextThreadId = kFirstThreadId;
@@ -432,6 +441,7 @@ private:
     std::atomic<bool> m_guestExecuting{false};
     std::atomic<bool> m_stopRequested{false};
     std::atomic<bool> m_checkpointPending{false};
+    bool m_unwindingForCheckpoint = false;
     uint32_t m_debugPublishCountdown = 0u;
 
     mutable std::mutex m_eventMutex;

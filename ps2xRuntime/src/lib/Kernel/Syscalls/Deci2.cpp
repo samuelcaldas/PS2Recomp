@@ -230,6 +230,12 @@ namespace ps2_syscalls
             return;
         }
         }
+#else
+        // No DECI2 host is attached: every request fails, as games expect when no debugger
+        // is connected (they disable their DECI2 TTY instead of waiting for a host reply).
+        (void)rdram;
+        (void)runtime;
+        setReturnS32(ctx, KE_ERROR);
 #endif
     }
 }

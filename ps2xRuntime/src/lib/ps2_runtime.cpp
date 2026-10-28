@@ -1,4 +1,5 @@
 #include "ps2_runtime.h"
+#include "runtime/write_watch_summary.h"
 #include "ps2_log.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
@@ -14,6 +15,7 @@
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
 
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <fstream>
@@ -524,6 +526,12 @@ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
     m_debugUiUserData = userData;
 }
 
+void PS2Runtime::setPresentationCallback(PresentationCallback callback, void *userData)
+{
+    m_presentationCallback = callback;
+    m_presentationUserData = userData;
+}
+
 PS2Runtime::~PS2Runtime()
 {
     try
@@ -732,7 +740,17 @@ bool PS2Runtime::initialize(const char *title)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+        int hostWinW = HOST_WINDOW_WIDTH;
+        int hostWinH = HOST_WINDOW_HEIGHT;
+        if (const char* envW = std::getenv("AOE2_WINDOW_WIDTH")) {
+            const int val = std::atoi(envW);
+            if (val > 0) hostWinW = val;
+        }
+        if (const char* envH = std::getenv("AOE2_WINDOW_HEIGHT")) {
+            const int val = std::atoi(envH);
+            if (val > 0) hostWinH = val;
+        }
+        InitWindow(hostWinW, hostWinH, title);
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
 #endif
@@ -1112,7 +1130,77 @@ bool PS2Runtime::registerFunction(uint32_t address, RecompiledFunction func)
 bool PS2Runtime::hasFunction(uint32_t address) const
 {
     uint32_t slot = 0u;
-    return generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr;
+    if (generatedFunctionTableSlot(address, slot) && g_ps2RecompiledFunctionTable[slot] != nullptr)
+    {
+        return true;
+    }
+    return findOverlayFunction(address) != nullptr;
+}
+
+bool PS2Runtime::addOverlayRegion(uint32_t base, uint32_t size, uint32_t idAddress)
+{
+    const uint64_t end = static_cast<uint64_t>(base) + size;
+    const bool idInside = idAddress >= base && static_cast<uint64_t>(idAddress) + sizeof(uint32_t) <= end;
+    if ((base & 3u) != 0u || (idAddress & 3u) != 0u || size == 0u || end > 0x100000000ull || !idInside)
+    {
+        return false;
+    }
+    for (const OverlayRegion &existing : m_overlayRegions)
+    {
+        const uint64_t existingEnd = static_cast<uint64_t>(existing.base) + existing.size;
+        if (base < existingEnd && existing.base < end)
+        {
+            return false;
+        }
+    }
+    m_overlayRegions.push_back(OverlayRegion{base, size, idAddress});
+    return true;
+}
+
+bool PS2Runtime::registerOverlayFunction(uint32_t overlayId, uint32_t address, RecompiledFunction func)
+{
+    if ((address & 3u) != 0u || func == nullptr)
+    {
+        return false;
+    }
+    for (const OverlayRegion &region : m_overlayRegions)
+    {
+        if (address >= region.base && address - region.base < region.size)
+        {
+            return m_overlayFunctions[overlayId].emplace(address, func).second;
+        }
+    }
+    return false;
+}
+
+PS2Runtime::RecompiledFunction PS2Runtime::findOverlayFunction(uint32_t address) const
+{
+    if ((address & 3u) != 0u)
+    {
+        return nullptr;
+    }
+    for (const OverlayRegion &region : m_overlayRegions)
+    {
+        if (address < region.base || address - region.base >= region.size)
+        {
+            continue;
+        }
+        const uint8_t *id = getConstMemPtr(m_memory.getRDRAM(), region.idAddress);
+        if (id == nullptr)
+        {
+            return nullptr;
+        }
+        uint32_t loaded = 0u;
+        std::memcpy(&loaded, id, sizeof(loaded));
+        const auto overlay = m_overlayFunctions.find(loaded);
+        if (overlay == m_overlayFunctions.end())
+        {
+            return nullptr;
+        }
+        const auto function = overlay->second.find(address);
+        return function == overlay->second.end() ? nullptr : function->second;
+    }
+    return nullptr;
 }
 
 const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
@@ -1146,6 +1234,11 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
         {
             return fn;
         }
+    }
+
+    if (RecompiledFunction overlayFunction = findOverlayFunction(address))
+    {
+        return overlayFunction;
     }
 
     std::cerr << "Error: No exact recompiled function for guest PC 0x" << std::hex << address
@@ -1350,6 +1443,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      GuestBranchKind kind,
                                      const char *debugName)
 {
+    PS2_IF_AGRESSIVE_LOGS({
+        if (kind == GuestBranchKind::IndirectCall)
+        {
+            std::cerr << "[branch:indirect] source=0x" << std::hex << sourcePc << " target=0x" << targetPc
+                      << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) << std::dec << std::endl;
+        }
+    });
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
 
@@ -1405,6 +1505,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     if (ctx->pc == entryPc)
     {
+        // A callee preempted at its own entry (a recursive call or a loop to the entry)
+        // also leaves pc == entryPc; treating that as a return resumes the caller with the
+        // callee's sp/ra, so keep unwinding to the scheduler instead.
+        if (m_eeScheduler && m_eeScheduler->unwindingForCheckpoint())
+        {
+            return false;
+        }
         ctx->pc = fallthroughPc;
     }
 
@@ -1451,6 +1558,38 @@ void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_
     // VCALLMS and VCALLMSR both route here.
     executeVU0Microprogram(rdram, ctx, address);
 }
+
+namespace
+{
+    const char *describeThreadStatus(EeThreadStatus status)
+    {
+        switch (status)
+        {
+        case EeThreadStatus::Running: return "running";
+        case EeThreadStatus::Ready: return "ready";
+        case EeThreadStatus::Waiting: return "waiting";
+        case EeThreadStatus::WaitingSuspended: return "waiting-suspended";
+        case EeThreadStatus::Suspended: return "suspended";
+        case EeThreadStatus::Dormant: return "dormant";
+        }
+        return "unknown";
+    }
+
+    const char *describeWaitReason(EeWaitReason reason)
+    {
+        switch (reason)
+        {
+        case EeWaitReason::None: return "none";
+        case EeWaitReason::Sleep: return "sleep";
+        case EeWaitReason::Semaphore: return "semaphore";
+        case EeWaitReason::EventFlag: return "eventflag";
+        case EeWaitReason::VSync: return "vsync";
+        case EeWaitReason::External: return "external";
+        case EeWaitReason::Mpeg: return "mpeg";
+        }
+        return "unknown";
+    }
+} // namespace
 
 void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx)
 {
@@ -1975,6 +2114,112 @@ uint32_t PS2Runtime::guestHeapLimit() const
     return m_guestHeapConfigured ? m_guestHeapLimit : m_guestHeapSuggestedBase;
 }
 
+void PS2Runtime::keepAsyncCallbackStacksBelow(uint32_t address)
+{
+    std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
+    if (address > m_asyncCallbackStackFloor && address < m_asyncCallbackStackTop)
+    {
+        m_asyncCallbackStackTop = address;
+    }
+}
+
+uint32_t g_ps2WriteWatchLow = 0u;
+uint32_t g_ps2WriteWatchSpan = 0u;
+
+namespace
+{
+    // Optional PS2X_WRITE_WATCH_VALUE: only report writes carrying this 32-bit value.
+    bool g_ps2WriteWatchHasValue = false;
+    uint32_t g_ps2WriteWatchValue = 0u;
+
+    bool carriesWatchedValue(uint64_t valueLo, uint64_t valueHi)
+    {
+        if (!g_ps2WriteWatchHasValue)
+            return true;
+        const uint32_t lanes[] = {static_cast<uint32_t>(valueLo), static_cast<uint32_t>(valueLo >> 32),
+                                  static_cast<uint32_t>(valueHi), static_cast<uint32_t>(valueHi >> 32)};
+        for (const uint32_t lane : lanes)
+        {
+            if (lane == g_ps2WriteWatchValue)
+                return true;
+        }
+        return false;
+    }
+}
+
+namespace
+{
+    // Parses PS2X_WRITE_WATCH ("0xLOW-0xHIGH") once at start-up.
+    struct Ps2WriteWatchConfig
+    {
+        Ps2WriteWatchConfig()
+        {
+            const char *text = std::getenv("PS2X_WRITE_WATCH");
+            if (text == nullptr)
+            {
+                return;
+            }
+            char *end = nullptr;
+            const unsigned long low = std::strtoul(text, &end, 0);
+            if (end == text || *end != '-')
+            {
+                std::cerr << "[write-watch] ignored malformed PS2X_WRITE_WATCH" << std::endl;
+                return;
+            }
+            const unsigned long high = std::strtoul(end + 1, nullptr, 0);
+            if (high <= low)
+            {
+                std::cerr << "[write-watch] ignored empty PS2X_WRITE_WATCH range" << std::endl;
+                return;
+            }
+            g_ps2WriteWatchLow = static_cast<uint32_t>(low) & PS2_RAM_MASK;
+            g_ps2WriteWatchSpan = static_cast<uint32_t>(high - low);
+            if (const char *value = std::getenv("PS2X_WRITE_WATCH_VALUE"))
+            {
+                g_ps2WriteWatchValue = static_cast<uint32_t>(std::strtoul(value, nullptr, 0));
+                g_ps2WriteWatchHasValue = true;
+            }
+            std::cerr << "[write-watch] watching 0x" << std::hex << g_ps2WriteWatchLow << "+0x"
+                      << g_ps2WriteWatchSpan << std::dec << std::endl;
+        }
+    } g_ps2WriteWatchConfig;
+}
+
+void ps2ReportWatchedWrite(uint32_t guestAddr,
+                           uint32_t size,
+                           uint64_t valueLo,
+                           uint64_t valueHi,
+                           const char *op,
+                           const R5900Context *ctx)
+{
+    if (WriteWatchSummary::instance().enabled())
+        return WriteWatchSummary::instance().record(ctx ? ctx->pc : 0u, ctx ? static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) : 0u, guestAddr, size);
+    if (!carriesWatchedValue(valueLo, valueHi))
+    {
+        return;
+    }
+    // PS2X_WRITE_WATCH_LIMIT raises the report cap (default 256).
+    static const uint32_t kMaxReports = []() {
+        const char *limit = std::getenv("PS2X_WRITE_WATCH_LIMIT");
+        return limit ? static_cast<uint32_t>(std::strtoul(limit, nullptr, 0)) : 256u;
+    }();
+    static std::atomic<uint32_t> reports{0u};
+    const uint32_t index = reports.fetch_add(1u, std::memory_order_relaxed);
+    if (index > kMaxReports)
+    {
+        return;
+    }
+    if (index == kMaxReports)
+    {
+        std::cerr << "[write-watch] further hits suppressed" << std::endl;
+        return;
+    }
+    std::cerr << "[write-watch] op=" << op << " addr=0x" << std::hex << guestAddr << " size=" << std::dec << size
+              << " lo=0x" << std::hex << valueLo << " hi=0x" << valueHi
+              << " pc=0x" << (ctx ? ctx->pc : 0u) << " ra=0x" << (ctx ? getRegU32(ctx, 31) : 0u)
+              << std::dec << std::endl;
+}
+
 uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment)
 {
     if (size == 0u)
@@ -2194,6 +2439,12 @@ bool PS2Runtime::isStopRequested() const
     return m_stopRequested.load(std::memory_order_relaxed);
 }
 
+void PS2Runtime::presentedFrameExtent(uint32_t &width, uint32_t &height) const
+{
+    width = m_presentedFrameWidth.load(std::memory_order_acquire);
+    height = m_presentedFrameHeight.load(std::memory_order_acquire);
+}
+
 EeScheduler &PS2Runtime::eeScheduler()
 {
     return *m_eeScheduler;
@@ -2360,6 +2611,7 @@ void PS2Runtime::run()
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
     Texture2D frameTex = LoadTextureFromImage(blank);
+    SetTextureFilter(frameTex, TEXTURE_FILTER_BILINEAR);
     UnloadImage(blank);
 
     std::atomic<bool> gameThreadFinished{false};
@@ -2418,11 +2670,28 @@ void PS2Runtime::run()
                                                << " vif=" << curVif
                                                << std::endl);
 
+                for (const auto &thread : eeSnapshot.threads)
+                {
+                    RUNTIME_LOG("[run:thread] tick=" << tick
+                                                     << " id=" << thread.id
+                                                     << " status=" << describeThreadStatus(thread.status)
+                                                     << " wait=" << describeWaitReason(thread.waitReason)
+                                                     << " waitId=" << thread.waitId
+                                                     << " priority=" << thread.currentPriority
+                                                     << " pc=0x" << std::hex << thread.pc
+                                                     << " ra=0x" << thread.ra << " sp=0x" << thread.sp
+                                                     << " entry=0x" << thread.entry << std::dec
+                                                     << " depth=" << thread.invocationDepth
+                                                     << std::endl);
+                }
+
             }
         });
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight);
+        m_presentedFrameWidth.store(presentWidth, std::memory_order_release);
+        m_presentedFrameHeight.store(presentHeight, std::memory_order_release);
 
         BeginDrawing();
         ClearBackground(BLACK);
@@ -2440,6 +2709,10 @@ void PS2Runtime::run()
             dstWidth,
             dstHeight};
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        if (m_presentationCallback)
+        {
+            m_presentationCallback(*this, m_presentationUserData);
+        }
         if (m_debugUiInitialized && m_debugUiDrawCallback)
         {
             m_debugUiDrawCallback(*this, m_debugUiUserData);

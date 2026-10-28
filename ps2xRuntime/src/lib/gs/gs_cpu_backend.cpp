@@ -1,4 +1,5 @@
 #include "runtime/gs/gs_cpu_backend.h"
+#include "runtime/gs/gs_frame_stats.h"
 #include "runtime/gs/ps2_gs_common.h"
 #include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -708,13 +710,26 @@ GSTransferSnapshot GSCpuBackend::GetTransferSnapshot() const
     return result;
 }
 
+namespace
+{
+    // PS2X_GS_PRIM_LOG_LIMIT raises how many primitives the aggressive log describes (default 64).
+    uint32_t primitiveLogLimit()
+    {
+        static const uint32_t limit = []() -> uint32_t {
+            const char *text = std::getenv("PS2X_GS_PRIM_LOG_LIMIT");
+            return text != nullptr ? static_cast<uint32_t>(std::strtoul(text, nullptr, 10)) : 64u;
+        }();
+        return limit;
+    }
+}
+
 void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
 {
     const GSDrawState &state = batch.state;
     const auto &ctx = state.context;
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
-        if (primitiveIndex < 64u)
+        if (primitiveIndex < primitiveLogLimit())
         {
             std::cout << "[gs:prim] idx=" << primitiveIndex
                       << " type=" << static_cast<uint32_t>(state.prim.type)
@@ -755,6 +770,10 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
                       << " v0=(" << batch.vertices[0].x << "," << batch.vertices[0].y << ")"
                       << " uv0=(" << (batch.vertices[0].u >> 4) << "," << (batch.vertices[0].v >> 4) << ")"
                       << " stq0=(" << batch.vertices[0].s << "," << batch.vertices[0].t << "," << batch.vertices[0].q << ")"
+                      << " z0=" << batch.vertices[0].z
+                      << " zbuf=(zbp=" << ctx.zbuf.zbp << " psm=0x" << std::hex << static_cast<uint32_t>(ctx.zbuf.psm)
+                      << std::dec << " zmsk=" << static_cast<uint32_t>(ctx.zbuf.zmask ? 1u : 0u) << ")"
+                      << " fbmsk=0x" << std::hex << ctx.frame.fbmsk << std::dec
                       << " v1=(" << batch.vertices[1].x << "," << batch.vertices[1].y << ")"
                       << " uv1=(" << (batch.vertices[1].u >> 4) << "," << (batch.vertices[1].v >> 4) << ")"
                       << " stq1=(" << batch.vertices[1].s << "," << batch.vertices[1].t << "," << batch.vertices[1].q << ")"
@@ -818,6 +837,7 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
         }
     });
 
+    GSFrameStats::instance().recordPrimitive(batch);
     switch (state.prim.type)
     {
     case GS_PRIM_SPRITE:
@@ -877,7 +897,9 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
         return;
     }
 
-    const uint32_t ztestMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+    // TEST.ZTE (bit 16) clear means no depth test: the pixel passes whatever ZTST says.
+    const bool depthTestEnabled = ((ctx.test >> 16) & 1u) != 0u;
+    const uint32_t ztestMethod = depthTestEnabled ? static_cast<uint32_t>((ctx.test >> 17) & 3u) : 1u;
     const bool alphaBlendEnabled = state.prim.abe;
     const bool preserveDestinationAlpha = writeMask.writeRgb && !writeMask.writeAlpha && fpsm == GS_PSM_CT32;
     const bool destinationAlphaTestNeedsRead = ((ctx.test >> 14) & 0x1u) != 0u && (fpsm == GS_PSM_CT32 || fpsm == GS_PSM_CT16 || fpsm == GS_PSM_CT16S);

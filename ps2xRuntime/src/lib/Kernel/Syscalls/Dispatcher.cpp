@@ -4,8 +4,69 @@
 
 namespace ps2_syscalls
 {
+    namespace
+    {
+        // Diagnostic trace for semaphore syscalls (create/delete/signal/wait and the
+        // interrupt forms). Logs the arguments on entry and the returned v0 on exit, so
+        // a retry loop shows which semaphore ids the guest passes and what came back.
+        // Only in aggressive-log builds (AOE2_RUNTIME_DIAGNOSTICS).
+        bool isSemaphoreSyscall(uint32_t number)
+        {
+            return (number >= 0x40u && number <= 0x47u) || number == static_cast<uint32_t>(-0x43) ||
+                   number == static_cast<uint32_t>(-0x49);
+        }
+
+        class SemaphoreSyscallTrace
+        {
+        public:
+            SemaphoreSyscallTrace(uint32_t number, R5900Context *ctx)
+                : m_number(number), m_ctx(ctx), m_enabled(isSemaphoreSyscall(number))
+            {
+                if (!m_enabled)
+                {
+                    return;
+                }
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[syscall:sema:enter] no=0x" << std::hex << m_number
+                              << " a0=0x" << getRegU32(m_ctx, 4)
+                              << " a1=0x" << getRegU32(m_ctx, 5)
+                              << " a2=0x" << getRegU32(m_ctx, 6)
+                              << " a3=0x" << getRegU32(m_ctx, 7)
+                              << " pc=0x" << m_ctx->pc
+                              << " ra=0x" << getRegU32(m_ctx, 31)
+                              << std::dec << std::endl;
+                });
+            }
+
+            ~SemaphoreSyscallTrace()
+            {
+                if (!m_enabled)
+                {
+                    return;
+                }
+                PS2_IF_AGRESSIVE_LOGS({
+                    std::cerr << "[syscall:sema:exit] no=0x" << std::hex << m_number
+                              << " v0=0x" << getRegU32(m_ctx, 2)
+                              << std::dec << std::endl;
+                });
+            }
+
+        private:
+            uint32_t m_number;
+            R5900Context *m_ctx;
+            bool m_enabled;
+        };
+    } // namespace
+
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        // Traced before overrides: the guest can install its own handlers (SetSyscall),
+        // and those must show up here too.
+        const SemaphoreSyscallTrace semaphoreTrace(syscallNumber, ctx);
+        PS2_IF_AGRESSIVE_LOGS({
+            std::cerr << "[syscall] no=0x" << std::hex << syscallNumber << " a0=0x" << getRegU32(ctx, 4)
+                      << " pc=0x" << ctx->pc << " ra=0x" << getRegU32(ctx, 31) << std::dec << std::endl;
+        });
         if (dispatchSyscallOverride(syscallNumber, rdram, ctx, runtime))
         {
             return true;

@@ -1,6 +1,7 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_frame_stats.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <cstring>
@@ -98,6 +99,7 @@ namespace
     }
 
     constexpr uint32_t kGsCsrRegOffset = 0x1000u;
+    constexpr uint32_t kIntcStatAddress = 0x1000F000u;
 
     // Atomically apply a 32-bit write to one half (off=0 low dword, off=4 high
     // dword) of the GS CSR register. Bits 0..1 of the low dword (SIGNAL/FINISH) are
@@ -1198,6 +1200,13 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         return true;
     }
 
+    if (address == kIntcStatAddress)
+    {
+        // INTC_STAT is write-one-to-clear; sceGsSyncV clears VBLANK_START and polls it.
+        m_ioRegisters[address] = readIORegister(address) & ~value;
+        return true;
+    }
+
     if (address == 0x1000E010u)
     {
         const uint32_t current = m_ioRegisters.count(address) ? m_ioRegisters[address] : 0u;
@@ -1513,6 +1522,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (transferTagData)
                             appendVifTagData(currentTagAddr);
 
+                        if (hasPayload && channelBase == 0x1000A000u)
+                            GSFrameStats::instance().recordGifSource(dataAddr, tagQwc);
                         if (hasPayload)
                             appendData(dataAddr, tagQwc);
                         if (irq && tieEnabled)
@@ -1693,6 +1704,7 @@ void PS2Memory::processPendingTransfers()
             const uint64_t bytes64 = static_cast<uint64_t>(p.qwc) * 16ull;
             uint32_t sizeBytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
             uint32_t srcPhys = 0;
+            GSFrameStats::instance().recordGifSource(p.srcAddr, p.qwc);
             try
             {
                 srcPhys = translateAddress(p.srcAddr);
@@ -2276,6 +2288,15 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
 int PS2Memory::pollDmaRegisters()
 {
     return 0;
+}
+
+void PS2Memory::raiseIntcStatus(uint32_t cause)
+{
+    if (cause >= 32u)
+    {
+        return;
+    }
+    m_ioRegisters[kIntcStatAddress] = readIORegister(kIntcStatAddress) | (1u << cause);
 }
 
 uint32_t PS2Memory::readIORegister(uint32_t address)

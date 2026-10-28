@@ -274,6 +274,7 @@ public:
 
     // Memory access methods
     uint8_t *getRDRAM() { return m_rdram; }
+    const uint8_t *getRDRAM() const { return m_rdram; }
     uint8_t *getScratchpad() { return m_scratchpad; }
     uint8_t *getIOPRAM() { return iop_ram; }
     uint64_t dmaStartCount() const { return m_dmaStartCount.load(std::memory_order_relaxed); }
@@ -306,6 +307,8 @@ public:
     // Hardware register interface
     bool writeIORegister(uint32_t address, uint32_t value);
     uint32_t readIORegister(uint32_t address);
+    // Latches an INTC cause in INTC_STAT; guest writes of one clear it again.
+    void raiseIntcStatus(uint32_t cause);
 
     // EE timers advance from the scheduler's emulated EE-cycle clock. The
     // returned mask uses bits 0..3 for newly raised TIM0..TIM3 interrupts.

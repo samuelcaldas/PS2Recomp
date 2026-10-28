@@ -515,6 +515,21 @@ namespace ps2_syscalls
             server->rsize = static_cast<int>(receiveSize);
             server->rmode = ((mode & kSifRpcModeNowait) && endFunction == 0u) ? 0 : 1;
             server->rid = 0;
+            PS2_IF_AGRESSIVE_LOGS({
+                uint32_t packetWords[4] = {};
+                if (client->hdr.pkt_addr != 0u)
+                    for (uint32_t index = 0u; index < 4u; ++index)
+                    {
+                        const auto *word = reinterpret_cast<const uint32_t *>(getMemPtr(rdram, client->hdr.pkt_addr + index * 4u));
+                        if (word)
+                            packetWords[index] = *word;
+                    }
+                std::cerr << "[rpc:call-enter] client=0x" << std::hex << clientPtr << " sid=0x" << sid
+                          << " rpc=0x" << rpcNum << " mode=0x" << mode << " rmode=" << std::dec << server->rmode
+                          << " pkt=0x" << std::hex << server->pkt_addr << " recv=0x" << receiveBuffer
+                          << "/0x" << receiveSize << " packetw=" << packetWords[0] << "," << packetWords[1]
+                          << "," << packetWords[2] << "," << packetWords[3] << std::dec << std::endl;
+            });
 
             if (server->buf != 0u && sendBuf != 0u && sendSize != 0u)
             {
@@ -609,6 +624,20 @@ namespace ps2_syscalls
 
             auto completeClient = [=](R5900Context &base, bool callbackCompleted)
             {
+                PS2_IF_AGRESSIVE_LOGS({
+                    uint32_t receiveWords[4] = {};
+                    for (uint32_t index = 0u; index < std::min<uint32_t>(4u, receiveSize / 4u); ++index)
+                    {
+                        const auto *word = getEeGuestStruct<uint32_t>(rdram, receiveBuffer + index * 4u);
+                        if (word)
+                            receiveWords[index] = *word;
+                    }
+                    std::cerr << "[rpc:call-complete] client=0x" << std::hex << clientPtr << " sid=0x" << sid
+                              << " rpc=0x" << rpcNum << " dest=0x" << receiveBuffer << "/0x" << std::dec << receiveSize
+                              << " result=0x" << std::hex << resultPointer << " callback=" << callbackCompleted
+                              << " recvw=" << receiveWords[0] << "," << receiveWords[1] << "," << receiveWords[2]
+                              << "," << receiveWords[3] << std::dec << std::endl;
+                });
                 {
                     std::lock_guard<std::mutex> lock(g_rpc_mutex);
                     g_rpc_clients[clientPtr].busy = false;
@@ -816,15 +845,57 @@ namespace ps2_syscalls
 
     void SifCheckStatRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t clientPtr = getRegU32(ctx, 4);
+        const uint32_t clientPtr = getRegU32(ctx, 4);
         std::lock_guard<std::mutex> lock(g_rpc_mutex);
-        auto it = g_rpc_clients.find(clientPtr);
-        if (it == g_rpc_clients.end())
-        {
-            setReturnS32(ctx, 0);
-            return;
-        }
-        setReturnS32(ctx, it->second.busy ? 1 : 0);
+        const auto it = g_rpc_clients.find(clientPtr);
+        const bool hostEntryPresent = it != g_rpc_clients.end();
+        const bool hostBusy = hostEntryPresent && it->second.busy;
+
+        PS2_IF_AGRESSIVE_LOGS(([&]() {
+            const auto *client = getEeGuestStruct<t_SifRpcClientData>(rdram, clientPtr);
+            const auto *server = client && client->server
+                                     ? getEeGuestStruct<t_SifRpcServerData>(rdram, client->server)
+                                     : nullptr;
+            const uint32_t packetAddress = client ? client->hdr.pkt_addr : 0u;
+            uint32_t packetWords[4] = {};
+            if (packetAddress != 0u)
+                for (uint32_t index = 0u; index < 4u; ++index)
+                {
+                    const auto *word = getEeGuestStruct<uint32_t>(rdram, packetAddress + index * 4u);
+                    if (word)
+                        packetWords[index] = *word;
+                }
+            using TraceState = std::array<uint32_t, 15>;
+            static std::unordered_map<uint32_t, TraceState> previousByClient;
+            const TraceState current{
+                hostEntryPresent ? 1u : 0u, hostBusy ? 1u : 0u,
+                client ? client->hdr.rpc_id : 0u, client ? static_cast<uint32_t>(client->hdr.sema_id) : 0u,
+                client ? client->hdr.mode : 0u, client ? client->command : 0u,
+                packetAddress, client ? client->server : 0u,
+                server ? static_cast<uint32_t>(server->sid) : 0u,
+                server ? static_cast<uint32_t>(server->rpc_number) : 0u,
+                server ? static_cast<uint32_t>(server->rmode) : 0u,
+                packetWords[0], packetWords[1], packetWords[2], packetWords[3]};
+            const auto previous = previousByClient.find(clientPtr);
+            if ((previous != previousByClient.end() && previous->second != current) ||
+                (previous == previousByClient.end() && previousByClient.size() < 128u))
+            {
+                if (previousByClient.size() < 128u || previous != previousByClient.end())
+                    previousByClient[clientPtr] = current;
+                std::cerr << "[rpc:checkstat] source=host-map client=0x" << std::hex << clientPtr
+                          << " entry=" << current[0] << " busy=" << current[1]
+                          << " sid-hdr=" << current[2] << " sema=" << current[3]
+                          << " hdrmode=" << current[4] << " command=" << current[5]
+                          << " pkt=0x" << packetAddress << " server=0x" << current[7]
+                          << " server-sid=" << current[8] << " server-rpc=" << current[9]
+                          << " rmode=" << current[10] << " pktw=" << current[11] << "," << current[12]
+                          << "," << current[13] << "," << current[14]
+                          << " pc=0x" << (ctx ? ctx->pc : 0u) << " ra=0x" << getRegU32(ctx, 31)
+                          << std::dec << " thread="
+                          << (runtime ? runtime->eeScheduler().currentThreadId() : -1) << std::endl;
+            }
+        }()));
+        setReturnS32(ctx, hostBusy ? 1 : 0);
     }
 
     void SifSetRpcQueue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

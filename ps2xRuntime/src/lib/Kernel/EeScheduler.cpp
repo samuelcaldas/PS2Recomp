@@ -36,6 +36,11 @@ namespace
     constexpr uint64_t kAlarmTickMicroseconds = 64u;
     constexpr uint32_t kDebugPublishDispatchInterval = 4096u;
 
+    bool defersPreemption(GuestInvocationKind kind)
+    {
+        return kind == GuestInvocationKind::Interrupt || kind == GuestInvocationKind::Alarm;
+    }
+
     constexpr uint64_t microsecondsToEeCycles(uint64_t microseconds)
     {
         return (microseconds * EeScheduler::kEeClockHz + 999999ull) / 1000000ull;
@@ -170,6 +175,16 @@ void EeScheduler::run()
             GuestThread *next = selectReady();
             if (!next && m_pendingInvocations.empty())
             {
+                PS2_IF_AGRESSIVE_LOGS({
+                    for (const auto &[threadId, candidate] : m_threads)
+                    {
+                        if (candidate.status == EeThreadStatus::Ready)
+                        {
+                            std::cerr << "[sched:lost-ready] thread=" << threadId << " priority=" << candidate.currentPriority
+                                      << " pc=0x" << std::hex << candidate.context.pc << std::dec << std::endl;
+                        }
+                    }
+                });
                 copyMainContextToRuntime();
                 publishIdleDebugContext();
                 publishSnapshot();
@@ -294,10 +309,20 @@ void EeScheduler::run()
 
         try
         {
-            m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
+            m_insideInterrupt = !running->invocations.empty() && defersPreemption(running->invocations.back().kind);
+            m_unwindingForCheckpoint = false;
             m_guestExecuting.store(true, std::memory_order_release);
+            const uint32_t dispatchedPc = context.pc;
             function(m_rdram, &context, &m_runtime);
             m_guestExecuting.store(false, std::memory_order_release);
+            PS2_IF_AGRESSIVE_LOGS({
+                if (context.pc == 0u && running->invocations.empty())
+                {
+                    std::cerr << "[sched:pc-zero] thread=" << running->id << " from=0x" << std::hex << dispatchedPc
+                              << " ra=0x" << getRegU32(&context, 31) << " sp=0x" << getRegU32(&context, 29)
+                              << " v0=0x" << getRegU32(&context, 2) << std::dec << std::endl;
+                }
+            });
             m_insideInterrupt = false;
         }
         catch (const EeDispatcherTransfer &)
@@ -314,7 +339,10 @@ void EeScheduler::run()
         }
 
         processPendingEvents();
-        if (m_rescheduleRequested && m_currentThreadId != 0)
+        const GuestThread *activeThread = currentThread();
+        const bool interruptInvocationActive = activeThread && !activeThread->invocations.empty() &&
+                                               defersPreemption(activeThread->invocations.back().kind);
+        if (m_rescheduleRequested && m_currentThreadId != 0 && !interruptInvocationActive)
         {
             GuestThread *preempted = currentThread();
             assert(preempted != nullptr);
@@ -361,6 +389,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     if (m_checkpointPending.load(std::memory_order_acquire) ||
         m_stopRequested.load(std::memory_order_acquire))
     {
+        m_unwindingForCheckpoint = true;
         return true;
     }
 
@@ -368,6 +397,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
     {
         m_checkpointPending.store(true, std::memory_order_release);
+        m_unwindingForCheckpoint = true;
         return true;
     }
 
@@ -381,6 +411,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     {
         m_rescheduleRequested = true;
         m_timeSliceExpired = true;
+        m_unwindingForCheckpoint = true;
         return true;
     }
 
@@ -821,7 +852,9 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
 int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uint32_t option)
 {
     assertExecutor();
-    if (maxCount <= 0 || initCount < 0 || initCount > maxCount)
+    // A max_count of zero or less means "no maximum": games create such semaphores and
+    // the EE kernel accepts them (Play! ignores max_count entirely).
+    if (initCount < 0 || (maxCount > 0 && initCount > maxCount))
     {
         return KE_ERROR;
     }
@@ -838,6 +871,11 @@ int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uin
     semaphore.attr = attr;
     semaphore.option = option;
     m_semaphores.emplace(id, std::move(semaphore));
+    PS2_IF_AGRESSIVE_LOGS({
+        std::cerr << "[sched:create-sema] sema=" << id << " init=" << initCount << " max=" << maxCount
+                  << " caller=0x" << std::hex << (currentThread() ? currentThread()->context.pc : 0u)
+                  << std::dec << std::endl;
+    });
     publishSnapshot();
     return id;
 }
@@ -866,6 +904,9 @@ int EeScheduler::deleteSemaphore(int id, bool interruptSafe)
 int EeScheduler::signalSemaphore(int id, bool interruptSafe)
 {
     assertExecutor();
+    PS2_IF_AGRESSIVE_LOGS({
+        std::cerr << "[sched:signal] sema=" << id << " interruptSafe=" << interruptSafe << std::endl;
+    });
     EeSemaphore *object = semaphore(id);
     if (!object)
     {
@@ -881,7 +922,7 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
         publishSnapshot();
         return id;
     }
-    if (object->count == object->maxCount)
+    if (object->maxCount > 0 && object->count == object->maxCount)
     {
         return KE_SEMA_OVF;
     }
@@ -1081,6 +1122,16 @@ int EeScheduler::setAlarm(uint16_t ticks,
     return id;
 }
 
+void EeScheduler::scheduleHostCallback(uint64_t delayCycles, std::function<void()> callback)
+{
+    assertExecutor();
+    const uint32_t id = m_nextHostCallbackId++;
+    m_hostCallbacks.emplace(id, std::move(callback));
+    scheduleEvent(m_eeCycle + delayCycles,
+                  std::chrono::steady_clock::now() + eeCyclesToHostDuration(delayCycles),
+                  EeEvent{EeEventType::HostCallback, id, 0});
+}
+
 int EeScheduler::cancelAlarm(int id)
 {
     assertExecutor();
@@ -1252,10 +1303,19 @@ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
     return KE_OK;
 }
 
-void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
+void EeScheduler::dispatchIrq(bool dmac, uint32_t cause, std::function<void()> afterHandlers)
 {
     assertExecutor();
     const uint32_t mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
+    PS2_IF_AGRESSIVE_LOGS({
+        std::cerr << "[irq:dispatch] dmac=" << dmac << " cause=" << cause << " mask=0x" << std::hex << mask
+                  << std::dec << std::endl;
+    });
+    if (!dmac)
+    {
+        // The status bit latches even when the cause is masked; guest code polls it.
+        m_runtime.memory().raiseIntcStatus(cause);
+    }
     if (cause < 32u && (mask & (1u << cause)) == 0u)
     {
         return;
@@ -1283,6 +1343,13 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
         SET_GPR_U32(&invocation.context, 28, handler.gp);
         SET_GPR_U32(&invocation.context, 29, 0u);
         SET_GPR_U32(&invocation.context, 31, 0u);
+        if (afterHandlers && &handler == &matching.back())
+        {
+            invocation.onComplete = [callback = std::move(afterHandlers)](const R5900Context &, R5900Context &)
+            {
+                callback();
+            };
+        }
         queueInvocation(std::move(invocation));
     }
 }
@@ -1684,6 +1751,14 @@ void EeScheduler::blockCurrent(EeWaitState wait)
 {
     GuestThread *self = currentThread();
     assert(self != nullptr);
+    PS2_IF_AGRESSIVE_LOGS({
+        std::cerr << "[sched:block] thread=" << self->id
+                  << " reason=" << static_cast<int>(wait.reason)
+                  << " object=" << waitObjectId(wait)
+                  << " pc=0x" << std::hex << self->context.pc
+                  << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(self->context.r[31], 0))
+                  << std::dec << std::endl;
+    });
     self->wait = std::move(wait);
     self->status = self->suspendCount == 0 ? EeThreadStatus::Waiting : EeThreadStatus::WaitingSuspended;
     m_currentThreadId = 0;
@@ -1734,6 +1809,10 @@ void EeScheduler::applyPendingPreemption()
     }
     GuestThread *self = currentThread();
     assert(self != nullptr);
+    if (!self->invocations.empty() && defersPreemption(self->invocations.back().kind))
+    {
+        return;
+    }
     enqueueReady(*self, !m_timeSliceExpired);
     m_currentThreadId = 0;
     m_rescheduleRequested = false;
@@ -1910,6 +1989,18 @@ void EeScheduler::processEvent(const EeEvent &event)
         break;
     case EeEventType::Dmac:
         break;
+    case EeEventType::HostCallback:
+    {
+        auto it = m_hostCallbacks.find(event.id);
+        if (it == m_hostCallbacks.end())
+        {
+            break;
+        }
+        std::function<void()> callback = std::move(it->second);
+        m_hostCallbacks.erase(it);
+        callback();
+        break;
+    }
     case EeEventType::Alarm:
     {
         auto it = m_alarms.find(static_cast<int>(event.id));

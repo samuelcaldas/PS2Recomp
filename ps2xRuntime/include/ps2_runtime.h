@@ -237,6 +237,25 @@ inline uint8_t ps2PathWatchExtractByteFromWrite(uint32_t writeAddr, uint32_t wat
     return static_cast<uint8_t>((valueHi >> ((byteIndex - 8u) * 8u)) & 0xFFu);
 }
 
+// Diagnostic write watch, active only in aggressive-log builds. The watched physical range
+// comes from the PS2X_WRITE_WATCH environment variable ("0xLOW-0xHIGH", HIGH exclusive); with
+// the variable unset the span is zero and nothing is reported. Reports are bounded.
+extern uint32_t g_ps2WriteWatchLow;
+extern uint32_t g_ps2WriteWatchSpan;
+void ps2ReportWatchedWrite(uint32_t guestAddr,
+                           uint32_t size,
+                           uint64_t valueLo,
+                           uint64_t valueHi,
+                           const char *op,
+                           const R5900Context *ctx);
+
+inline bool ps2WriteTouchesWatch(uint32_t guestAddr, uint32_t size)
+{
+    const uint32_t physical = guestAddr & PS2_RAM_MASK;
+    return (physical - g_ps2WriteWatchLow) < g_ps2WriteWatchSpan ||
+           (g_ps2WriteWatchLow - physical) < size;
+}
+
 inline void ps2TraceGuestWrite(uint8_t *rdram,
                                uint32_t guestAddr,
                                uint32_t size,
@@ -252,7 +271,12 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,
     (void)valueHi;
     (void)op;
     (void)ctx;
-    // TODO we dont need this anymore so on next release it will be deleted
+    PS2_IF_AGRESSIVE_LOGS({
+        if (g_ps2WriteWatchSpan != 0u && ps2WriteTouchesWatch(guestAddr, size))
+        {
+            ps2ReportWatchedWrite(guestAddr, size, valueLo, valueHi, op, ctx);
+        }
+    });
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
@@ -266,7 +290,12 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
     (void)size;
     (void)op;
     (void)ctx;
-    // TODO we dont need this anymore so on next release it will be deleted
+    PS2_IF_AGRESSIVE_LOGS({
+        if (g_ps2WriteWatchSpan != 0u && ps2WriteTouchesWatch(guestAddr, size))
+        {
+            ps2ReportWatchedWrite(guestAddr, size, 0u, 0u, op, ctx);
+        }
+    });
 }
 
 class PS2Runtime
@@ -307,6 +336,9 @@ public:
                              DebugUiCallback shutdownCallback,
                              void *userData);
 
+    using PresentationCallback = void (*)(PS2Runtime &runtime, void *userData);
+    void setPresentationCallback(PresentationCallback callback, void *userData);
+
     using RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
 
     enum class GuestBranchKind
@@ -338,6 +370,14 @@ public:
     bool registerFunction(uint32_t address, RecompiledFunction func);
     RecompiledFunction lookupFunction(uint32_t address);
     bool hasFunction(uint32_t address) const;
+
+    // Overlay code. Several overlays share a guest region; the u32 at idAddress (inside the
+    // region) names the one currently loaded. Functions registered for another id are not
+    // visible. The region must not overlap another region.
+    bool addOverlayRegion(uint32_t base, uint32_t size, uint32_t idAddress);
+    // Fails if no region contains address, if address is unaligned, or if (overlayId, address)
+    // is already registered.
+    bool registerOverlayFunction(uint32_t overlayId, uint32_t address, RecompiledFunction func);
     bool dispatchGuestBranch(uint8_t *rdram,
                              R5900Context *ctx,
                              uint32_t targetPc,
@@ -384,11 +424,17 @@ public:
     uint32_t guestHeapEnd() const;
     uint32_t guestHeapLimit() const;
     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
+    // Keeps later callback and interrupt stacks below address, so they do not overlap a
+    // guest-owned stack that sits at the top of RAM (SetupThread's main stack).
+    void keepAsyncCallbackStacksBelow(uint32_t address);
 
     void drainCompletedDmacHandlers(uint8_t *rdram);
 
     void requestStop();
     bool isStopRequested() const;
+    // Size of the GS frame last drawn to the window (0x0 before the first frame), so host
+    // input can map window positions through the same aspect fit as the presentation.
+    void presentedFrameExtent(uint32_t &width, uint32_t &height) const;
 
     EeScheduler &eeScheduler();
     const EeScheduler &eeScheduler() const;
@@ -489,6 +535,16 @@ private:
 
 private:
     PS2Memory m_memory;
+    struct OverlayRegion
+    {
+        uint32_t base;
+        uint32_t size;
+        uint32_t idAddress;
+    };
+    std::vector<OverlayRegion> m_overlayRegions;
+    // overlay id -> guest address -> function
+    std::unordered_map<uint32_t, std::unordered_map<uint32_t, RecompiledFunction>> m_overlayFunctions;
+    RecompiledFunction findOverlayFunction(uint32_t address) const;
     GifArbiter m_gifArbiter;
     GS m_gs;
     std::unique_ptr<PS2IopHostAdapter> m_iopHost;
@@ -515,6 +571,8 @@ private:
     bool m_guestHeapConfigured = false;
     uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    std::atomic<uint32_t> m_presentedFrameWidth{0};
+    std::atomic<uint32_t> m_presentedFrameHeight{0};
 
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
     std::atomic<bool> m_missingFunctionReported{false};
@@ -524,6 +582,9 @@ private:
     DebugUiCallback m_debugUiShutdownCallback = nullptr;
     void *m_debugUiUserData = nullptr;
     bool m_debugUiInitialized = false;
+
+    PresentationCallback m_presentationCallback = nullptr;
+    void *m_presentationUserData = nullptr;
 
 public:
     std::atomic<uint32_t> m_debugPc{0};

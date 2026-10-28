@@ -282,7 +282,8 @@ namespace ps2_syscalls
             target->ownsStack = true;
         }
         const int result = ee.startThread(id, arg, *ctx, false);
-        setReturnS32(ctx, result);
+        // The EE kernel returns the thread id on success; games assert on it.
+        setReturnS32(ctx, result == KE_OK ? id : result);
         ee.transferIfRequested(false);
     }
 

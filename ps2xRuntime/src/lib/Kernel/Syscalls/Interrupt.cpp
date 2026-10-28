@@ -28,6 +28,13 @@ namespace ps2_syscalls
                         PS2Runtime *runtime,
                         bool dmac)
         {
+            PS2_IF_AGRESSIVE_LOGS({
+                std::cerr << "[irq:add] " << (dmac ? "dmac" : "intc")
+                          << " cause=" << getRegU32(ctx, 4)
+                          << " handler=0x" << std::hex << getRegU32(ctx, 5) << std::dec
+                          << " arg=0x" << std::hex << getRegU32(ctx, 7) << std::dec
+                          << std::endl;
+            });
             const int id = scheduler(rdram, ctx, runtime)
                                .addIrqHandler(dmac,
                                               getRegU32(ctx, 4),

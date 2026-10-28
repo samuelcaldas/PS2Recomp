@@ -1,5 +1,6 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_cpu_backend.h"
+#include "runtime/gs/gs_frame_stats.h"
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
 #include <atomic>
@@ -539,6 +540,8 @@ void GS::latchHostPresentationFrame()
         }
         request = buildPresentationRequestUnlocked();
     }
+    if (const std::string stats = GSFrameStats::instance().latch(request); !stats.empty())
+        std::cout << stats << std::endl;
 
     PresentationFrame frame{};
     {
@@ -1392,6 +1395,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             command.trxpos = m_trxpos;
             command.trxreg = m_trxreg;
             command.direction = m_trxdir;
+            GSFrameStats::instance().recordTransfer(command);
             m_backend->BeginTransfer(command);
         }
         recordTransferDebugEventUnlocked();
