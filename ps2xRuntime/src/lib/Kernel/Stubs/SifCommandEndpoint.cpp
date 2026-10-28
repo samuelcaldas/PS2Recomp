@@ -1,4 +1,5 @@
 #include "SifCommandEndpoint.h"
+#include "runtime/ps2_memory.h"
 
 #include <cstring>
 
@@ -24,7 +25,7 @@ namespace ps2_sif
         constexpr size_t kRpcPacketBytes = 64u;
 
         // EE addresses arrive with segment bits (uncached 0x20000000, 0x30000000).
-        constexpr uint32_t kEeRamMask = 0x01FFFFFFu;
+        constexpr uint32_t kEeRamMask = PS2_RAM_MASK;
         // Server handles must be nonzero (zero means the bind failed), and some games use SID 0.
         constexpr uint32_t kServerHandleXor = 0xACACACACu;
         constexpr uint32_t kSregRpcInit = 0u;
