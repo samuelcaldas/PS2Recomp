@@ -122,13 +122,16 @@ public:
 
         glGenTextures(1, &m_texture);
         glBindTexture(GL_TEXTURE_2D, m_texture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
         std::vector<uint32_t> blank(640 * 512, 0xFF000000);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 640, 512, 0, GL_RGBA, GL_UNSIGNED_BYTE, blank.data());
+
+        m_textureWidth = 640;
+        m_textureHeight = 512;
 
         glGenBuffers(1, &m_vbo);
 
@@ -138,7 +141,7 @@ public:
         return true;
     }
 
-    void Present(const void* rgbaPixels, uint32_t fbWidth, uint32_t fbHeight, uint32_t dispWidth, uint32_t dispHeight) {
+    void Present(const void* rgbaPixels, uint32_t fbWidth, uint32_t fbHeight, uint32_t dispWidth, uint32_t dispHeight, uint32_t strideBytes) {
         if (!m_initialized) return;
 
         AppletOperationMode op_mode = appletGetOperationMode();
@@ -156,7 +159,19 @@ public:
 
         if (rgbaPixels && fbWidth > 0 && fbHeight > 0) {
             glBindTexture(GL_TEXTURE_2D, m_texture);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, fbWidth, fbHeight, GL_RGBA, GL_UNSIGNED_BYTE, rgbaPixels);
+            if (fbWidth != m_textureWidth || fbHeight != m_textureHeight) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fbWidth, fbHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                m_textureWidth = fbWidth;
+                m_textureHeight = fbHeight;
+            }
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            if (strideBytes == uint64_t(fbWidth) * 4u) {
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, fbWidth, fbHeight, GL_RGBA, GL_UNSIGNED_BYTE, rgbaPixels);
+            } else if (strideBytes >= uint64_t(fbWidth) * 4u) {
+                for (uint32_t y = 0; y < fbHeight; ++y)
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y, fbWidth, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                                   static_cast<const uint8_t*>(rgbaPixels) + size_t(y) * strideBytes);
+            }
         }
 
         float u_max = (fbWidth > 0) ? (static_cast<float>(dispWidth) / static_cast<float>(fbWidth)) : 1.0f;
@@ -234,6 +249,7 @@ private:
     GLint m_texUniform = -1;
     u32 m_winWidth = 1280;
     u32 m_winHeight = 720;
+    uint32_t m_textureWidth = 640, m_textureHeight = 512;
     bool m_initialized = false;
 };
 

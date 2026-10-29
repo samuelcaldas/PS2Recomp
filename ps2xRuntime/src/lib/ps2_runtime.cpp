@@ -379,121 +379,73 @@ namespace
     }
 }
 
-static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
-
-static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
+struct PresentationState
 {
-    static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
-    static bool s_hasLatchedInitialFrame = false;
-    static uint32_t s_lastDisplayFbp = std::numeric_limits<uint32_t>::max();
-    static uint32_t s_lastSourceFbp = std::numeric_limits<uint32_t>::max();
-    static bool s_lastPreferred = false;
-    static uint32_t s_lastWidth = 0u;
-    static uint32_t s_lastHeight = 0u;
-    static bool s_hasUploadedFrame = false;
-    static std::vector<uint8_t> s_scratch;
+    PS2PresentationFrameCache frame;
+    uint64_t lastTick = std::numeric_limits<uint64_t>::max();
+    bool latched = false;
+};
 
-    const uint64_t currentTick = rt->eeScheduler().currentVSyncTick();
-    const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick;
-    if (needsLatch)
+static void UploadFrame(Texture2D &tex, PS2Runtime *rt, PresentationState &state,
+                        uint32_t &outWidth, uint32_t &outHeight)
+{
+    const uint64_t tick = rt->eeScheduler().currentVSyncTick();
+    bool changed = false;
+    if (!state.latched || tick != state.lastTick)
     {
         rt->gs().latchHostPresentationFrame();
-        s_lastPresentationTick = currentTick;
-        s_hasLatchedInitialFrame = true;
-    }
-    else if (s_hasUploadedFrame)
-    {
-        outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
-        outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
-        return;
-    }
-
-    s_scratch.clear();
-    uint32_t width = 0u;
-    uint32_t height = 0u;
-    uint32_t displayFbp = 0u;
-    uint32_t sourceFbp = 0u;
-    bool usedPreferredDisplaySource = false;
-    if (!rt->gs().copyLatchedHostPresentationFrame(s_scratch,
-                                                   width,
-                                                   height,
-                                                   &displayFbp,
-                                                   &sourceFbp,
-                                                   &usedPreferredDisplaySource))
-    {
-        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
-        UpdateTexture(tex, blank.data);
-        UnloadImage(blank);
-        outWidth = FB_WIDTH;
-        outHeight = DEFAULT_DISPLAY_HEIGHT;
-        s_lastWidth = outWidth;
-        s_lastHeight = outHeight;
-        s_hasUploadedFrame = true;
-        return;
-    }
-
-    PS2_IF_AGRESSIVE_LOGS({
-        static uint32_t s_uploadDebugCount = 0u;
-        if (s_uploadDebugCount < 128u ||
-            displayFbp != s_lastDisplayFbp ||
-            sourceFbp != s_lastSourceFbp ||
-            usedPreferredDisplaySource != s_lastPreferred ||
-            width != s_lastWidth ||
-            height != s_lastHeight)
+        state.lastTick = tick;
+        state.latched = true;
+        std::vector<uint8_t> snapshot;
+        uint32_t width = 0, height = 0;
+        if (rt->gs().copyLatchedHostPresentationFrame(snapshot, width, height) &&
+            width && height && uint64_t(width) * 4u <= UINT32_MAX &&
+            uint64_t(width) * height * 4u <= snapshot.size())
         {
-            std::cout << "[frame:upload] idx=" << s_uploadDebugCount
-                      << " tick=" << currentTick
-                      << " displayFbp=" << displayFbp
-                      << " sourceFbp=" << sourceFbp
-                      << " size=" << width << "x" << height
-                      << " preferred=" << static_cast<uint32_t>(usedPreferredDisplaySource ? 1u : 0u)
-                      << std::endl;
-        }
-        ++s_uploadDebugCount;
-    });
-    s_lastDisplayFbp = displayFbp;
-    s_lastSourceFbp = sourceFbp;
-    s_lastPreferred = usedPreferredDisplaySource;
-    s_lastWidth = width;
-    s_lastHeight = height;
-
-    std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
-    if (!s_scratch.empty() && width != 0u && height != 0u)
-    {
-        const uint32_t copyWidth = std::min<uint32_t>(width, FB_WIDTH);
-        const uint32_t copyHeight = std::min<uint32_t>(height, FB_HEIGHT);
-        const size_t srcRowBytes = static_cast<size_t>(width) * 4u;
-        const size_t dstRowBytes = static_cast<size_t>(FB_WIDTH) * 4u;
-        const size_t copyRowBytes = static_cast<size_t>(copyWidth) * 4u;
-        for (uint32_t y = 0; y < copyHeight; ++y)
-        {
-            const size_t srcOffset = static_cast<size_t>(y) * srcRowBytes;
-            const size_t dstOffset = static_cast<size_t>(y) * dstRowBytes;
-            if (srcOffset + copyRowBytes > s_scratch.size() ||
-                dstOffset + copyRowBytes > s_uploadBuffer.size())
-            {
-                break;
-            }
-            std::memcpy(s_uploadBuffer.data() + dstOffset, s_scratch.data() + srcOffset, copyRowBytes);
+            // GS has copied the frame under its own lock. Composition sees only
+            // this immutable host snapshot, before any graphics upload or draw.
+            changed = state.frame.update({snapshot.data(), width, height, width * 4u},
+                [rt](auto view) { return rt->composePresentationFrame(view); });
         }
     }
-
+    if (state.frame.pixels.empty())
+    {
+        state.frame.width = FB_WIDTH;
+        state.frame.height = DEFAULT_DISPLAY_HEIGHT;
+        state.frame.pixels.resize(size_t(FB_WIDTH) * DEFAULT_DISPLAY_HEIGHT * 4u);
+        for (size_t i = 0; i < state.frame.pixels.size(); i += 4)
+        {
+            state.frame.pixels[i] = 255;
+            state.frame.pixels[i + 2] = 255;
+            state.frame.pixels[i + 3] = 255;
+        }
+        changed = true;
+    }
 #if !defined(PLATFORM_SWITCH) && !defined(__SWITCH__)
-    UpdateTexture(tex, s_uploadBuffer.data());
+    if (changed)
+    {
+        if (tex.width != static_cast<int>(state.frame.width) || tex.height != static_cast<int>(state.frame.height))
+        {
+            UnloadTexture(tex);
+            Image image{};
+            image.data = state.frame.pixels.data();
+            image.width = static_cast<int>(state.frame.width);
+            image.height = static_cast<int>(state.frame.height);
+            image.mipmaps = 1;
+            image.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+            tex = LoadTextureFromImage(image);
+            SetTextureFilter(tex, TEXTURE_FILTER_BILINEAR);
+        }
+        else
+            UpdateTexture(tex, state.frame.pixels.data());
+    }
 #else
     (void)tex;
+    (void)changed;
 #endif
-    outWidth = width;
-    outHeight = height;
-    s_hasUploadedFrame = true;
+    outWidth = state.frame.width;
+    outHeight = state.frame.height;
 }
-
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-static const uint8_t* GetUploadedFrameBuffer()
-{
-    return s_uploadBuffer.data();
-}
-#endif
 
 PS2Runtime::PS2Runtime()
 {
@@ -540,6 +492,26 @@ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
     m_debugUiDrawCallback = drawCallback;
     m_debugUiShutdownCallback = shutdownCallback;
     m_debugUiUserData = userData;
+}
+
+void PS2Runtime::setFrameCompositor(FrameCompositor compositor)
+{
+    m_frameCompositor = std::move(compositor);
+}
+
+std::optional<PS2OwnedPresentationFrame> PS2Runtime::composePresentationFrame(PS2PresentationFrameView frame)
+{
+    const uint64_t inputBytes = PS2PresentationFrameBytes(frame);
+    if (!inputBytes || inputBytes > std::numeric_limits<size_t>::max() || !m_frameCompositor)
+        return std::nullopt;
+    auto output = m_frameCompositor(frame);
+    if (!output || !output->pixels || output->width > 1920u || output->height > 1080u)
+        return std::nullopt;
+    const uint64_t bytes = PS2PresentationFrameBytes(
+        {output->pixels->data(), output->width, output->height, output->strideBytes});
+    if (!bytes || bytes > output->pixels->size())
+        return std::nullopt;
+    return output;
 }
 
 void PS2Runtime::setPresentationCallback(PresentationCallback callback, void *userData)
@@ -2670,6 +2642,7 @@ void PS2Runtime::run()
         }
         gameThreadFinished.store(true, std::memory_order_release); });
 
+    PresentationState presentation;
     uint64_t tick = 0;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
@@ -2724,11 +2697,11 @@ void PS2Runtime::run()
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
 #if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
         Texture2D dummyTex{};
-        UploadFrame(dummyTex, this, presentWidth, presentHeight);
+        UploadFrame(dummyTex, this, presentation, presentWidth, presentHeight);
         m_presentedFrameWidth.store(presentWidth, std::memory_order_release);
         m_presentedFrameHeight.store(presentHeight, std::memory_order_release);
 
-        SwitchGlesPresenter::Instance().Present(GetUploadedFrameBuffer(), FB_WIDTH, FB_HEIGHT, presentWidth, presentHeight);
+        SwitchGlesPresenter::Instance().Present(presentation.frame.pixels.data(), presentWidth, presentHeight, presentWidth, presentHeight, presentWidth * 4u);
         if (m_presentationCallback)
         {
             m_presentationCallback(*this, m_presentationUserData);
@@ -2741,7 +2714,7 @@ void PS2Runtime::run()
             break;
         }
 #else
-        UploadFrame(frameTex, this, presentWidth, presentHeight);
+        UploadFrame(frameTex, this, presentation, presentWidth, presentHeight);
         m_presentedFrameWidth.store(presentWidth, std::memory_order_release);
         m_presentedFrameHeight.store(presentHeight, std::memory_order_release);
 

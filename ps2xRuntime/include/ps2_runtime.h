@@ -24,6 +24,7 @@
 #include <unordered_set>
 
 #include "ps2_log.h"
+#include "runtime/presentation_frame.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/ps2_memory.h"
@@ -336,6 +337,13 @@ public:
                              DebugUiCallback shutdownCallback,
                              void *userData);
 
+    using FrameCompositor = std::function<std::optional<PS2OwnedPresentationFrame>(PS2PresentationFrameView)>;
+    // Called on the presentation thread with an immutable host snapshot. Callbacks
+    // must use host snapshots only and must never read guest memory. Configure
+    // before run(); nullopt (including invalid output) keeps legacy presentation.
+    void setFrameCompositor(FrameCompositor compositor);
+    std::optional<PS2OwnedPresentationFrame> composePresentationFrame(PS2PresentationFrameView frame);
+
     using PresentationCallback = void (*)(PS2Runtime &runtime, void *userData);
     void setPresentationCallback(PresentationCallback callback, void *userData);
 
@@ -583,6 +591,7 @@ private:
     void *m_debugUiUserData = nullptr;
     bool m_debugUiInitialized = false;
 
+    FrameCompositor m_frameCompositor;
     PresentationCallback m_presentationCallback = nullptr;
     void *m_presentationUserData = nullptr;
 
