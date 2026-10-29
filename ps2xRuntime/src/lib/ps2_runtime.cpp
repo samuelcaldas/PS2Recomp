@@ -571,10 +571,12 @@ PS2Runtime::~PS2Runtime()
             m_debugUiInitialized = false;
         }
 
+#if !defined(PLATFORM_SWITCH) && !defined(__SWITCH__)
         if (IsWindowReady())
         {
             CloseWindow();
         }
+#endif
 
         m_loadedModules.clear();
     }
@@ -774,8 +776,8 @@ bool PS2Runtime::initialize(const char *title)
         InitWindow(hostWinW, hostWinH, title);
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
-#endif
         SetTargetFPS(60);
+#endif
         if (m_debugUiInitCallback)
         {
             m_debugUiInitCallback(*this, m_debugUiUserData);
