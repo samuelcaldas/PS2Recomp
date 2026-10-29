@@ -566,7 +566,7 @@ private:
     std::vector<GuestHeapBlock> m_guestHeapBlocks;
     uint32_t m_guestHeapBase = 0x00100000u;
     uint32_t m_guestHeapEnd = 0x00100000u;
-    uint32_t m_guestHeapLimit = PS2_HLE_RESERVATION_BASE;
+    uint32_t m_guestHeapLimit = PS2_MAP_ARENA_BASE;
     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
     bool m_guestHeapConfigured = false;
     uint32_t m_asyncCallbackStackFloor = PS2_ASYNC_STACK_FLOOR;

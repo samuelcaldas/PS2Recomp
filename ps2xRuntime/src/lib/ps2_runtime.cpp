@@ -95,7 +95,7 @@ namespace
     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
-    constexpr uint32_t kGuestHeapHardLimit = PS2_HLE_RESERVATION_BASE;
+    constexpr uint32_t kGuestHeapHardLimit = PS2_MAP_ARENA_BASE;
     static_assert(PS2_HLE_RESERVATION_SIZE == 0x00040000u);
 
     constexpr uint32_t COP0_CAUSE_EXCCODE_MASK = 0x0000007Cu;
@@ -931,9 +931,9 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
             return false;
         }
 
-        if (!scratch && segmentMemEnd > PS2_HLE_RESERVATION_BASE)
+        if (!scratch && segmentMemEnd > PS2_MAP_ARENA_BASE)
         {
-            std::cerr << "ELF segment " << i << " overlaps reserved HLE or callback-stack memory." << std::endl;
+            std::cerr << "ELF segment " << i << " overlaps reserved map, HLE or callback-stack memory." << std::endl;
             return false;
         }
 

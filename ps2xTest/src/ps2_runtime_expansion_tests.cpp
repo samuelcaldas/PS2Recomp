@@ -6,6 +6,7 @@
 #include "ps2_runtime.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_syscalls.h"
+#include "Syscalls/System.h"
 #include "ps2_stubs.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ee_scheduler.h"
@@ -318,7 +319,42 @@ void register_ps2_runtime_expansion_tests()
 {
     MiniTest::Case("PS2RuntimeExpansion", [](TestCase &tc)
     {
-        tc.Run("ELF loads reject HLE and stack reservations before writes", [](TestCase &t)
+        tc.Run("heap syscalls exclude the map arena with and without a runtime", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            R5900Context context{};
+            for (uint32_t size : {0u, 0xffffffffu, PS2_RAM_SIZE})
+            {
+                setRegU32(context, 4, 0x00100000u);
+                setRegU32(context, 5, size);
+                ps2_syscalls::SetupHeap(nullptr, &context, &runtime);
+                ps2_syscalls::EndOfHeap(nullptr, &context, &runtime);
+                t.Equals(::getRegU32(&context, 2), PS2_MAP_ARENA_BASE, "guest heap end excludes map memory");
+            }
+            ps2_syscalls::EndOfHeap(nullptr, &context, nullptr);
+            t.Equals(::getRegU32(&context, 2), PS2_MAP_ARENA_BASE, "fallback heap end also excludes map memory");
+        });
+
+        tc.Run("map arena remains excluded across heap reconfiguration", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            constexpr uint32_t arenaBase = PS2_HLE_RESERVATION_BASE - 8u * 1024u * 1024u;
+            runtime.memory().initialize();
+            auto *memory = runtime.memory().getRDRAM();
+            memory[arenaBase] = 0x5au;
+            memory[PS2_HLE_RESERVATION_BASE - 1u] = 0xa5u;
+            for (uint32_t limit : {0u, PS2_HLE_RESERVATION_BASE, PS2_RAM_SIZE})
+            {
+                runtime.configureGuestHeap(arenaBase - 16u, limit);
+                t.Equals(runtime.guestHeapLimit(), arenaBase, "heap ends before persistent map storage");
+                t.Equals(runtime.guestMalloc(16u), arenaBase - 16u, "last heap block is usable");
+                t.Equals(runtime.guestMalloc(16u), 0u, "arena is never allocated by heap");
+                t.Equals(memory[arenaBase], uint8_t{0x5a}, "heap reset preserves arena start");
+                t.Equals(memory[PS2_HLE_RESERVATION_BASE - 1u], uint8_t{0xa5}, "heap reset preserves arena end");
+            }
+        });
+
+        tc.Run("ELF loads reject map, HLE and stack reservations before writes", [](TestCase &t)
         {
             const auto path = std::filesystem::temp_directory_path() /
                 ("ps2-ram-reservation-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".elf");
@@ -326,9 +362,10 @@ void register_ps2_runtime_expansion_tests()
                 std::filesystem::path path;
                 ~RemoveFixture() { std::filesystem::remove(path); }
             } fixture{path};
-            for (uint32_t address : {PS2_HLE_RESERVATION_BASE - 8u, PS2_HLE_RESERVATION_BASE - 4u,
-                                     PS2_HLE_RESERVATION_BASE, PS2_ASYNC_STACK_FLOOR,
-                                     0x80000000u | PS2_HLE_RESERVATION_BASE})
+            for (uint32_t address : {PS2_MAP_ARENA_BASE - 8u, PS2_MAP_ARENA_BASE - 4u,
+                                     PS2_MAP_ARENA_BASE, PS2_HLE_RESERVATION_BASE, PS2_ASYNC_STACK_FLOOR,
+                                     0x80000000u | PS2_MAP_ARENA_BASE,
+                                     0xa0000000u | PS2_MAP_ARENA_BASE})
             {
                 ELFIO::elfio writer;
                 writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
@@ -353,24 +390,26 @@ void register_ps2_runtime_expansion_tests()
                 runtime.memory().initialize();
                 auto *memory = runtime.memory().getRDRAM();
                 memory[PS2_HLE_RESERVATION_BASE] = 0xabu;
-                const bool valid = address == PS2_HLE_RESERVATION_BASE - 8u;
+                memory[PS2_MAP_ARENA_BASE] = 0xcdu;
+                const bool valid = address == PS2_MAP_ARENA_BASE - 8u;
                 t.Equals(runtime.loadELF(path.string()), valid, "only a segment wholly below reservations loads");
-                t.Equals(memory[PS2_HLE_RESERVATION_BASE], uint8_t{0xab}, "reserved bytes remain untouched");
+                t.Equals(memory[PS2_HLE_RESERVATION_BASE], uint8_t{0xab}, "reserved HLE bytes remain untouched");
+                t.Equals(memory[PS2_MAP_ARENA_BASE], uint8_t{0xcd}, "reserved map bytes remain untouched");
             }
         });
 
-        tc.Run("64MB heap stops below HLE pools and callback stacks", [](TestCase &t)
+        tc.Run("64MB heap stops below map arena and callback stacks remain independent", [](TestCase &t)
         {
             PS2Runtime runtime;
-            const uint32_t hleBase = PS2_RAM_SIZE - 0x00140000u;
+            const uint32_t arenaBase = PS2_MAP_ARENA_BASE;
             const uint32_t stackFloor = PS2_RAM_SIZE - 0x00100000u;
             runtime.configureGuestHeap(0x00100000u);
 
-            t.Equals(runtime.guestHeapLimit(), hleBase,
-                     "default guest heap must end below the reserved HLE pools");
-            const uint32_t finalHeapAllocation = runtime.guestMalloc(hleBase - 0x00100000u);
+            t.Equals(runtime.guestHeapLimit(), arenaBase,
+                     "default guest heap must end below the reserved map arena");
+            const uint32_t finalHeapAllocation = runtime.guestMalloc(arenaBase - 0x00100000u);
             t.Equals(finalHeapAllocation, 0x00100000u,
-                     "heap may allocate up to its exclusive HLE reservation boundary");
+                     "heap may allocate up to its exclusive map reservation boundary");
             t.Equals(runtime.guestMalloc(1u), 0u,
                      "heap must not allocate into HLE pools");
             const uint32_t stack = runtime.reserveAsyncCallbackStack(0x1000u);
