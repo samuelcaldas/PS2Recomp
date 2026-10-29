@@ -24,6 +24,7 @@ add_library(ps2_test_lib STATIC
     src/code_generator_tests.cpp
     src/r5900_decoder_tests.cpp
     src/elf_analyzer_tests.cpp
+    src/map_arena_tests.cpp
     src/presentation_frame_tests.cpp
     src/pad_input_tests.cpp
     src/ps2_runtime_io_tests.cpp

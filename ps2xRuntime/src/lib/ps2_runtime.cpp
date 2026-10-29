@@ -522,6 +522,7 @@ void PS2Runtime::setPresentationCallback(PresentationCallback callback, void *us
 
 PS2Runtime::~PS2Runtime()
 {
+    shutdownMapArena();
     try
     {
         requestStop();
@@ -662,6 +663,7 @@ bool PS2Runtime::syncCoreSubsystems()
         return true;
     }
 
+    resetMapArena();
     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
@@ -713,6 +715,7 @@ bool PS2Runtime::syncCoreSubsystems()
 
 bool PS2Runtime::initialize(const char *title)
 {
+    resetMapArena();
     try
     {
         if (!m_memory.initialize())
@@ -1944,6 +1947,31 @@ void PS2Runtime::freeGuestBlockLocked(uint32_t guestAddr)
     coalesceGuestHeapLocked();
 }
 
+MapArenaLease PS2Runtime::claimMapArena(const void *owner)
+{
+    return m_mapArena.claim(owner);
+}
+
+bool PS2Runtime::releaseMapArena(const void *owner, uint64_t generation)
+{
+    return m_mapArena.release(owner, generation);
+}
+
+bool PS2Runtime::validateMapArena(const void *owner, uint64_t generation) const
+{
+    return m_mapArena.validate(owner, generation);
+}
+
+void PS2Runtime::resetMapArena()
+{
+    m_mapArena.reset();
+}
+
+void PS2Runtime::shutdownMapArena()
+{
+    m_mapArena.shutdown();
+}
+
 void PS2Runtime::configureGuestHeap(uint32_t guestBase, uint32_t guestLimit)
 {
     std::lock_guard<std::mutex> lock(m_guestHeapMutex);
@@ -2771,5 +2799,6 @@ void PS2Runtime::run()
     CloseWindow();
 #endif
 
+    shutdownMapArena();
     RUNTIME_LOG("[run] exiting loop");
 }

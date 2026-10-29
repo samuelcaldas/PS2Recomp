@@ -25,6 +25,7 @@
 
 #include "ps2_log.h"
 #include "runtime/presentation_frame.h"
+#include "runtime/map_arena.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/ps2_memory.h"
@@ -423,6 +424,14 @@ public:
     void handleTLBWR(uint8_t *rdram, R5900Context *ctx);
     void handleTLBP(uint8_t *rdram, R5900Context *ctx);
     void clearLLBit(R5900Context *ctx);
+    // Claims are idempotent for the same non-null owner; failed claims return {}.
+    // Reset/reinitialize/shutdown invalidate leases; guest heap changes do not.
+    [[nodiscard]] MapArenaLease claimMapArena(const void *owner);
+    bool releaseMapArena(const void *owner, uint64_t generation);
+    bool validateMapArena(const void *owner, uint64_t generation) const;
+    void resetMapArena();
+    void shutdownMapArena();
+
     void configureGuestHeap(uint32_t guestBase, uint32_t guestLimit = PS2_RAM_SIZE);
     uint32_t guestMalloc(uint32_t size, uint32_t alignment = 16u);
     uint32_t guestCalloc(uint32_t count, uint32_t size, uint32_t alignment = 16u);
@@ -543,6 +552,7 @@ private:
 
 private:
     PS2Memory m_memory;
+    MapArena m_mapArena;
     struct OverlayRegion
     {
         uint32_t base;
