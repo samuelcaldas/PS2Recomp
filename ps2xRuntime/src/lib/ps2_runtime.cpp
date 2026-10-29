@@ -434,10 +434,11 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, PresentationState &state
             image.mipmaps = 1;
             image.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
             tex = LoadTextureFromImage(image);
-            SetTextureFilter(tex, TEXTURE_FILTER_BILINEAR);
         }
         else
             UpdateTexture(tex, state.frame.pixels.data());
+        // Extent can stay unchanged when composition is enabled or disabled.
+        SetTextureFilter(tex, state.frame.usePointSampling() ? TEXTURE_FILTER_POINT : TEXTURE_FILTER_BILINEAR);
     }
 #else
     (void)tex;

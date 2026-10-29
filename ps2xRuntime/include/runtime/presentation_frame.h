@@ -29,7 +29,7 @@ inline uint64_t PS2PresentationFrameBytes(PS2PresentationFrameView frame)
     return uint64_t(frame.height - 1u) * frame.strideBytes + uint64_t(frame.width) * 4u;
 }
 
-// Shared desktop/Switch preparation step. Keep pixels and geometry together when
+// Shared desktop/Switch preparation step. Keep pixels, geometry and mode together when
 // no new snapshot arrives. Uploaders consume tightly packed host RGBA bytes.
 class PS2PresentationFrameCache
 {
@@ -56,9 +56,14 @@ public:
         pixels = std::move(packed);
         width = source.width;
         height = source.height;
+        composed = result.has_value();
         return true;
     }
 
+    // Graphics-independent desktop sampling decision for the retained frame.
+    bool usePointSampling() const { return composed; }
+
     std::vector<uint8_t> pixels;
     uint32_t width = 0, height = 0;
+    bool composed = false;
 };

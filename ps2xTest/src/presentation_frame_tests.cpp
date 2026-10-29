@@ -38,6 +38,31 @@ void register_presentation_frame_tests()
             t.Equals(cache.pixels.size(), size_t(8), "padding stripped");
             t.Equals(unsigned(cache.pixels[4]), 5u, "second row uses stride");
         });
+        tc.Run("sampling follows retained mode at identical extent", [](TestCase &t) {
+            PS2PresentationFrameCache cache;
+            uint8_t pixel[4]{1,2,3,4};
+            bool compose = true;
+            unsigned calls = 0;
+            auto compositor = [&](auto) -> std::optional<PS2OwnedPresentationFrame> {
+                ++calls;
+                if (!compose) return std::nullopt;
+                return PS2OwnedPresentationFrame{std::make_shared<const std::vector<uint8_t>>(4,42),1,1,4};
+            };
+            t.IsTrue(!cache.composed && !cache.usePointSampling(), "legacy defaults to bilinear");
+            t.IsTrue(cache.update({pixel,1,1,4}, compositor), "composed frame accepted");
+            t.IsTrue(cache.composed && cache.usePointSampling() && cache.pixels[0] == 42, "composed frame selects point");
+            compose = false;
+            t.IsTrue(!cache.update({nullptr,0,0,0}, compositor), "missing source does not update");
+            t.IsTrue(calls == 1 && cache.composed && cache.usePointSampling() &&
+                     cache.width == 1 && cache.height == 1 && cache.pixels.size() == 4 && cache.pixels[0] == 42,
+                     "missing source retains pixels extent and composed sampling");
+            t.IsTrue(cache.update({pixel,1,1,4}, compositor), "legacy frame accepted at same extent");
+            t.IsTrue(!cache.composed && !cache.usePointSampling() && cache.width == 1 && cache.height == 1 &&
+                     cache.pixels[0] == 1, "same extent switches back to legacy bilinear");
+            t.IsTrue(!cache.update({nullptr,0,0,0}, compositor) && !cache.composed &&
+                     !cache.usePointSampling() && cache.pixels[0] == 1 && calls == 2,
+                     "missing source retains legacy mode too");
+        });
         tc.Run("shared prepare composes before upload and retains coherent resize", [](TestCase &t) {
             PS2Runtime rt;
             PS2PresentationFrameCache cache;
