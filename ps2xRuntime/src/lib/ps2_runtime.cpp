@@ -2639,7 +2639,8 @@ void PS2Runtime::run()
     RUNTIME_LOG("Starting execution at address 0x" << std::hex << m_cpuContext.pc << std::dec);
 
 #if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-    SwitchGlesPresenter::Instance().Initialize();
+    if (!SwitchGlesPresenter::Instance().Initialize())
+        throw std::runtime_error("Failed to initialize native Switch GLES presenter");
 #else
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);

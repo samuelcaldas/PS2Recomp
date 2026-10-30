@@ -102,23 +102,73 @@ public:
             "}\n";
 
         GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+        if (!vs) return false;
         glShaderSource(vs, 1, &vsSrc, nullptr);
         glCompileShader(vs);
+        GLint shaderStatus = GL_FALSE;
+        glGetShaderiv(vs, GL_COMPILE_STATUS, &shaderStatus);
+        if (shaderStatus != GL_TRUE) {
+            char log[512]{};
+            GLsizei length = 0;
+            glGetShaderInfoLog(vs, static_cast<GLsizei>(sizeof(log)), &length, log);
+            std::cerr << "[SwitchGlesPresenter] Vertex shader compilation failed: " << log << '\n';
+            if (length > 0) svcOutputDebugString(log, static_cast<size_t>(length));
+            glDeleteShader(vs);
+            return false;
+        }
 
         GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+        if (!fs) {
+            glDeleteShader(vs);
+            return false;
+        }
         glShaderSource(fs, 1, &fsSrc, nullptr);
         glCompileShader(fs);
+        glGetShaderiv(fs, GL_COMPILE_STATUS, &shaderStatus);
+        if (shaderStatus != GL_TRUE) {
+            char log[512]{};
+            GLsizei length = 0;
+            glGetShaderInfoLog(fs, static_cast<GLsizei>(sizeof(log)), &length, log);
+            std::cerr << "[SwitchGlesPresenter] Fragment shader compilation failed: " << log << '\n';
+            if (length > 0) svcOutputDebugString(log, static_cast<size_t>(length));
+            glDeleteShader(vs);
+            glDeleteShader(fs);
+            return false;
+        }
 
         m_program = glCreateProgram();
+        if (!m_program) {
+            glDeleteShader(vs);
+            glDeleteShader(fs);
+            return false;
+        }
         glAttachShader(m_program, vs);
         glAttachShader(m_program, fs);
         glLinkProgram(m_program);
         glDeleteShader(vs);
         glDeleteShader(fs);
+        GLint programStatus = GL_FALSE;
+        glGetProgramiv(m_program, GL_LINK_STATUS, &programStatus);
+        if (programStatus != GL_TRUE) {
+            char log[512]{};
+            GLsizei length = 0;
+            glGetProgramInfoLog(m_program, static_cast<GLsizei>(sizeof(log)), &length, log);
+            std::cerr << "[SwitchGlesPresenter] Shader link failed: " << log << '\n';
+            if (length > 0) svcOutputDebugString(log, static_cast<size_t>(length));
+            glDeleteProgram(m_program);
+            m_program = 0;
+            return false;
+        }
 
         m_posAttr = glGetAttribLocation(m_program, "a_pos");
         m_uvAttr = glGetAttribLocation(m_program, "a_uv");
         m_texUniform = glGetUniformLocation(m_program, "u_tex");
+        if (m_posAttr < 0 || m_uvAttr < 0 || m_texUniform < 0) {
+            std::cerr << "[SwitchGlesPresenter] Required shader inputs are unavailable\n";
+            glDeleteProgram(m_program);
+            m_program = 0;
+            return false;
+        }
 
         glGenTextures(1, &m_texture);
         glBindTexture(GL_TEXTURE_2D, m_texture);
