@@ -1807,62 +1807,23 @@ bool GSCpuBackend::CopyFrameToHostRgba(const GSFrameReg &frame,
                                        uint32_t sourceOriginX,
                                        uint32_t sourceOriginY) const
 {
-#if defined(__SWITCH__)
-    svcOutputDebugString("[aoe2-switch] CopyFrameToHostRgba ENTER\n", 40);
-    char dbgbuf[128];
-    snprintf(dbgbuf, sizeof(dbgbuf), "[aoe2-switch] CFTR: this=%p vram=%p sz=%u f0=%p\n",
-             (const void*)this, (const void*)m_vram, m_vramSize, (void*)m_readVramFuncs[0]);
-    svcOutputDebugString(dbgbuf, strlen(dbgbuf));
-
-    char vbuf[160];
-    snprintf(vbuf, sizeof(vbuf), "[aoe2-switch] CFTR: vec=%p data=%p sz=%zu cap=%zu\n",
-             (void*)&outPixels, (void*)outPixels.data(), outPixels.size(), outPixels.capacity());
-    svcOutputDebugString(vbuf, strlen(vbuf));
-
-    void *testAlloc = malloc(1310720);
-    snprintf(vbuf, sizeof(vbuf), "[aoe2-switch] CFTR: malloc(1.3MB) -> %p\n", testAlloc);
-    svcOutputDebugString(vbuf, strlen(vbuf));
-    if (testAlloc) free(testAlloc);
-#endif
     if (!m_vram || m_vramSize == 0u)
         return false;
 
-#if defined(__SWITCH__)
-    svcOutputDebugString("[aoe2-switch] CFTR: step 1 before buffer prep\n", 46);
-#endif
     const size_t reqSize = static_cast<size_t>(kHostFrameWidth) * kHostFrameHeight * 4u;
     if (outPixels.size() < reqSize)
     {
-        void *test = malloc(reqSize);
-        if (!test)
-        {
-#if defined(__SWITCH__)
-            svcOutputDebugString("[aoe2-switch] CFTR: malloc(reqSize) failed, heap exhausted\n", 59);
-#endif
-            return false;
-        }
-        free(test);
         outPixels.resize(reqSize, 0u);
     }
     else
     {
         std::memset(outPixels.data(), 0, reqSize);
     }
-#if defined(__SWITCH__)
-    svcOutputDebugString("[aoe2-switch] CFTR: step 2 after buffer prep\n", 45);
-#endif
     const uint32_t baseBytes = frameBaseIsPages ? frame.fbp * 8192u : frame.fbp * 256u;
     const uint32_t basePtr = frameBaseIsPages ? GSInternal::framePageBaseToBlock(frame.fbp) : frame.fbp;
     const uint32_t fbw = frame.fbw ? frame.fbw : kHostFrameWidth / 64u;
     const uint32_t bytesPerPixel = (frame.psm == GS_PSM_CT16 || frame.psm == GS_PSM_CT16S) ? 2u : 4u;
     const uint32_t stride = fbw * 64u * bytesPerPixel;
-#if defined(__SWITCH__)
-    char cmsg[128];
-    snprintf(cmsg, sizeof(cmsg), "[aoe2-switch] CFTR: fbp=%u fbw=%u psm=%u w=%u h=%u basePtr=%u\n",
-             frame.fbp, fbw, (unsigned)frame.psm, width, height, basePtr);
-    svcOutputDebugString(cmsg, strlen(cmsg));
-    svcOutputDebugString("[aoe2-switch] CFTR: before loop\n", 32);
-#endif
 
     for (uint32_t y = 0; y < height; ++y)
     {
@@ -1919,17 +1880,12 @@ bool GSCpuBackend::CopyFrameToHostRgba(const GSFrameReg &frame,
             }
         }
     }
-#if defined(__SWITCH__)
-    svcOutputDebugString("[aoe2-switch] CFTR: loop finished\n", 32);
-    svcOutputDebugString("[aoe2-switch] CopyFrameToHostRgba SUCCESS\n", 42);
-#endif
     return true;
 }
 
 PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
 {
 #if defined(__SWITCH__)
-    svcOutputDebugString("[aoe2-switch] GSCpuBackend::Present ENTER\n", 42);
     // On Switch: present directly under m_mutex to avoid TLS corruption,
     // static initialization hazards, and 4MB per-frame snapshot overhead.
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -1950,9 +1906,6 @@ PresentationFrame GSCpuBackend::Present(const GSPresentationRequest &request)
 
 PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationRequest &request)
 {
-#if defined(__SWITCH__)
-    svcOutputDebugString("[aoe2-switch] PresentFromLocalMemory ENTER\n", 44);
-#endif
     PresentationFrame result{};
     const GSPmodeState pmode = decodePmode(request.pmode);
     const GSSmode2State smode2 = decodeSMode2(request.smode2);
@@ -1976,12 +1929,6 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     }
     const bool valid1 = enableCrt1 && hasDisplaySetup(request.display1, displayFrame1);
     const bool valid2 = enableCrt2 && hasDisplaySetup(request.display2, displayFrame2);
-#if defined(__SWITCH__)
-    char vmsg[128];
-    snprintf(vmsg, sizeof(vmsg), "[aoe2-switch] PFLM: valid1=%d valid2=%d w1=%u h1=%u w2=%u h2=%u\n",
-             (int)valid1, (int)valid2, width1, height1, width2, height2);
-    svcOutputDebugString(vmsg, strlen(vmsg));
-#endif
     if (!valid1 && !valid2)
         return result;
 
@@ -1995,12 +1942,6 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
                           std::vector<uint8_t> &pixels,
                           bool &usedPreferred) -> bool
     {
-#if defined(__SWITCH__)
-        char csmsg[128];
-        snprintf(csmsg, sizeof(csmsg), "[aoe2-switch] copySource ENTER: fbp=%u fbw=%u psm=%u w=%u h=%u pref=%d\n",
-                 displayFrame.fbp, displayFrame.fbw, (unsigned)displayFrame.psm, width, height, (int)request.hasPreferredSource);
-        svcOutputDebugString(csmsg, strlen(csmsg));
-#endif
         selected = displayFrame;
         pixels.clear();
         usedPreferred = false;
@@ -2013,17 +1954,11 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
         }
         if (pixels.empty() && !CopyFrameToHostRgba(displayFrame, width, height, pixels, preserveAlpha, true, true, origin.x, origin.y))
         {
-#if defined(__SWITCH__)
-            svcOutputDebugString("[aoe2-switch] copySource: CopyFrameToHostRgba failed\n", 53);
-#endif
             return false;
         }
 
         if (!usedPreferred && displayFrame.fbp == 0u && countNonBlackPixels(pixels, width, height) == 0u)
         {
-#if defined(__SWITCH__)
-            svcOutputDebugString("[aoe2-switch] copySource: searching contextFrames\n", 51);
-#endif
             for (const GSFrameReg &candidate : request.contextFrames)
             {
                 if (candidate.fbp == selected.fbp && candidate.fbw == selected.fbw && candidate.psm == selected.psm)
@@ -2038,9 +1973,6 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
                 break;
             }
         }
-#if defined(__SWITCH__)
-        svcOutputDebugString("[aoe2-switch] copySource SUCCESS\n", 34);
-#endif
         return true;
     };
 

@@ -309,12 +309,6 @@ void EeScheduler::run()
         {
             GuestInvocation invocation = std::move(m_pendingInvocations.front());
             m_pendingInvocations.pop_front();
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-            char pbuf[128];
-            snprintf(pbuf, sizeof(pbuf), "[aoe2-switch] popping pendingInvocation pc=0x%x kind=%d sp=0x%x\n",
-                     invocation.context.pc, (int)invocation.kind, getRegU32(&invocation.context, 29));
-            svcOutputDebugString(pbuf, strlen(pbuf));
-#endif
             if (getRegU32(&invocation.context, 29) == 0u)
             {
                 SET_GPR_U32(&invocation.context, 29, invocationStackTop());
@@ -381,7 +375,6 @@ void EeScheduler::run()
         else
         {
             m_dispatcherJumpBuf = prevJb;
-            svcOutputDebugString("[aoe2-switch] EeScheduler: transferDispatch returned to dispatch loop\n", 71);
         }
         m_guestExecuting.store(false, std::memory_order_release);
         m_insideInterrupt = false;
@@ -1258,12 +1251,6 @@ int EeScheduler::cancelAlarm(int id)
 void EeScheduler::queueInvocation(GuestInvocation invocation)
 {
     assertExecutor();
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-    char qbuf[128];
-    snprintf(qbuf, sizeof(qbuf), "[aoe2-switch] queueInvocation: pc=0x%x kind=%d pending=%zu\n",
-             invocation.context.pc, (int)invocation.kind, m_pendingInvocations.size());
-    svcOutputDebugString(qbuf, strlen(qbuf));
-#endif
     invocation.sequence = ++m_invocationSequence;
     m_pendingInvocations.push_back(std::move(invocation));
     m_checkpointPending.store(true, std::memory_order_release);
@@ -1271,19 +1258,8 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
 
 [[noreturn]] void EeScheduler::invokeCurrent(GuestInvocation invocation)
 {
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-    svcOutputDebugString("[aoe2-switch] invokeCurrent ENTER\n", 35);
-#endif
     assertExecutor();
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-    svcOutputDebugString("[aoe2-switch] invokeCurrent assertExecutor passed\n", 51);
-#endif
     GuestThread *owner = currentThread();
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-    char tbuf[128];
-    snprintf(tbuf, sizeof(tbuf), "[aoe2-switch] invokeCurrent owner=%p\n", (void*)owner);
-    svcOutputDebugString(tbuf, strlen(tbuf));
-#endif
     assert(owner != nullptr);
     if (getRegU32(&invocation.context, 29) == 0u)
     {
@@ -1292,9 +1268,6 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     invocation.sequence = ++m_invocationSequence;
     owner->invocations.push_back(std::move(invocation));
     publishSnapshot();
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-    svcOutputDebugString("[aoe2-switch] invokeCurrent transferring to dispatcher\n", 55);
-#endif
     transferDispatch();
 }
 
@@ -2118,11 +2091,6 @@ void EeScheduler::processEvent(const EeEvent &event)
         completeVSync(m_vsyncTick);
         if (m_gsVSyncCallback != 0u && m_runtime.hasFunction(m_gsVSyncCallback))
         {
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-            char vbuf[128];
-            snprintf(vbuf, sizeof(vbuf), "[aoe2-switch] VBlankStart queueing GsCallback pc=0x%x\n", m_gsVSyncCallback);
-            svcOutputDebugString(vbuf, strlen(vbuf));
-#endif
             GuestInvocation invocation{};
             invocation.kind = GuestInvocationKind::GsCallback;
             invocation.context.pc = m_gsVSyncCallback;
@@ -2132,13 +2100,7 @@ void EeScheduler::processEvent(const EeEvent &event)
             SET_GPR_U32(&invocation.context, 31, 0u);
             queueInvocation(std::move(invocation));
         }
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-        svcOutputDebugString("[aoe2-switch] VBlankStart dispatching Irq cause=2\n", 50);
-#endif
         dispatchIrq(false, 2u);
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-        svcOutputDebugString("[aoe2-switch] VBlankStart dispatchIrq finished\n", 47);
-#endif
         break;
     case EeEventType::ExternalWake:
         completeExternalWait(event.id, event.value, KE_OK);

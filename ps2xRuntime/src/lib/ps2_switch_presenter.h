@@ -278,9 +278,24 @@ public:
         glBindBuffer(GL_ARRAY_BUFFER, 0);
 
         static uint32_t s_presentCount = 0;
+        static uint32_t s_fpsFrames = 0;
+        static uint64_t s_lastFpsTick = 0;
         s_presentCount++;
-        if (s_presentCount <= 3 || s_presentCount % 60 == 0) {
-            svcOutputDebugString("[aoe2-switch] Present: before eglSwapBuffers\n", 45);
+        s_fpsFrames++;
+        const uint64_t nowTick = armGetSystemTick();
+        const uint64_t freqTick = armGetSystemTickFreq();
+        if (s_lastFpsTick == 0) {
+            s_lastFpsTick = nowTick;
+        } else if (nowTick - s_lastFpsTick >= freqTick) {
+            static const bool s_logFps = (std::getenv("AOE2_LOG_FPS") != nullptr);
+            if (s_logFps) {
+                const float currentFps = static_cast<float>(s_fpsFrames * freqTick) / static_cast<float>(nowTick - s_lastFpsTick);
+                char fpsMsg[64];
+                int msgLen = snprintf(fpsMsg, sizeof(fpsMsg), "[aoe2-switch] FPS: %.1f\n", currentFps);
+                if (msgLen > 0) svcOutputDebugString(fpsMsg, msgLen);
+            }
+            s_fpsFrames = 0;
+            s_lastFpsTick = nowTick;
         }
         eglSwapBuffers(m_display, m_surface);
         if (s_presentCount <= 3 || s_presentCount % 60 == 0) {

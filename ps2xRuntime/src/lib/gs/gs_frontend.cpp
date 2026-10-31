@@ -546,35 +546,17 @@ void GS::latchHostPresentationFrame()
         }
         request = buildPresentationRequestUnlocked();
     }
-#if defined(__SWITCH__)
-    svcOutputDebugString("[aoe2-switch] GS::latch: request built\n", 39);
-#endif
     if (const std::string stats = GSFrameStats::instance().latch(request); !stats.empty())
         std::cout << stats << std::endl;
 
     PresentationFrame frame{};
     {
-#if defined(__SWITCH__)
-        svcOutputDebugString("[aoe2-switch] GS::latch: acquiring backendLifetimeMutex\n", 56);
-#endif
         std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
-#if defined(__SWITCH__)
-        svcOutputDebugString("[aoe2-switch] GS::latch: acquired backendLifetimeMutex\n", 55);
-#endif
         if (m_backend)
         {
-#if defined(__SWITCH__)
-            svcOutputDebugString("[aoe2-switch] GS::latch: calling Flush/Sync\n", 44);
-#endif
             m_backend->Flush();
             m_backend->Sync(GSSyncReason::Presentation);
-#if defined(__SWITCH__)
-            svcOutputDebugString("[aoe2-switch] GS::latch: calling Present\n", 41);
-#endif
             frame = m_backend->Present(request);
-#if defined(__SWITCH__)
-            svcOutputDebugString("[aoe2-switch] GS::latch: Present returned\n", 42);
-#endif
         }
     }
 
@@ -600,9 +582,6 @@ void GS::latchHostPresentationFrame()
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
         recordPresentDebugEventUnlocked(displayFbp, sourceFbp, width, height, usedPreferred);
     }
-#if defined(__SWITCH__)
-    svcOutputDebugString("[aoe2-switch] GS::latchHostPresentationFrame FINISHED\n", 54);
-#endif
 }
 
 bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,

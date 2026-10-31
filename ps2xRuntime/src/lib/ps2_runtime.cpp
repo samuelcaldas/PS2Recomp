@@ -395,16 +395,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, PresentationState &state
     bool changed = false;
     if (!state.latched || tick != state.lastTick)
     {
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-        char tbuf[96];
-        snprintf(tbuf, sizeof(tbuf), "[aoe2-switch] UF: tick %llu != %llu -> latch ENTER\n",
-                 (unsigned long long)tick, (unsigned long long)state.lastTick);
-        svcOutputDebugString(tbuf, strlen(tbuf));
-#endif
         rt->gs().latchHostPresentationFrame();
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-        svcOutputDebugString("[aoe2-switch] UF: latch SUCCESS\n", 32);
-#endif
         state.lastTick = tick;
         state.latched = true;
         std::vector<uint8_t> snapshot;
@@ -413,25 +404,12 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, PresentationState &state
             width && height && uint64_t(width) * 4u <= UINT32_MAX &&
             uint64_t(width) * height * 4u <= snapshot.size())
         {
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-            svcOutputDebugString("[aoe2-switch] UF: copyLatched SUCCESS -> state.frame.update ENTER\n", 67);
-#endif
             // GS has copied the frame under its own lock. Composition sees only
             // this immutable host snapshot, before any graphics upload or draw.
             changed = state.frame.update({snapshot.data(), width, height, width * 4u},
                 [rt](auto view) {
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-                    svcOutputDebugString("[aoe2-switch] UF: composePresentationFrame ENTER\n", 49);
-#endif
-                    auto r = rt->composePresentationFrame(view);
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-                    svcOutputDebugString("[aoe2-switch] UF: composePresentationFrame DONE\n", 48);
-#endif
-                    return r;
+                    return rt->composePresentationFrame(view);
                 });
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-            svcOutputDebugString("[aoe2-switch] UF: state.frame.update DONE\n", 42);
-#endif
         }
     }
     if (state.frame.pixels.empty())
@@ -1488,7 +1466,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      const char *debugName)
 {
     PS2_IF_AGRESSIVE_LOGS({
-        if (kind == GuestBranchKind::IndirectCall)
+        static const bool traceIndirectBranches = (std::getenv("AOE2_TRACE_INDIRECT_BRANCH") != nullptr);
+        if (traceIndirectBranches && kind == GuestBranchKind::IndirectCall)
         {
             std::cerr << "[branch:indirect] source=0x" << std::hex << sourcePc << " target=0x" << targetPc
                       << " ra=0x" << static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0)) << std::dec << std::endl;
