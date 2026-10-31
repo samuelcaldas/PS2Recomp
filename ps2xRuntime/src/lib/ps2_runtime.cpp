@@ -391,6 +391,17 @@ struct PresentationState
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, PresentationState &state,
                         uint32_t &outWidth, uint32_t &outHeight)
 {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    // The game has no independent native presentation pipeline yet. In
+    // particular, its map compositor consumes this GS frame for the HUD.
+    // Do not silently present GS output while claiming native rendering.
+    (void)tex;
+    (void)rt;
+    (void)state;
+    (void)outWidth;
+    (void)outHeight;
+    throw std::runtime_error("Switch presentation unavailable: GS framebuffer fallback is disabled; native presentation is not implemented");
+#else
     const uint64_t tick = rt->eeScheduler().currentVSyncTick();
     bool changed = false;
     if (!state.latched || tick != state.lastTick)
@@ -457,6 +468,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, PresentationState &state
 #endif
     outWidth = state.frame.width;
     outHeight = state.frame.height;
+#endif
 }
 
 PS2Runtime::PS2Runtime()
