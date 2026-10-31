@@ -345,6 +345,11 @@ public:
     void setFrameCompositor(FrameCompositor compositor);
     std::optional<PS2OwnedPresentationFrame> composePresentationFrame(PS2PresentationFrameView frame);
 
+    // Native host frames only; configure before run and clear after it stops.
+    using NativeFrameProvider = std::function<std::optional<PS2OwnedPresentationFrame>()>;
+    void setNativeFrameProvider(NativeFrameProvider provider);
+    std::optional<PS2OwnedPresentationFrame> nativePresentationFrame();
+
     using PresentationCallback = void (*)(PS2Runtime &runtime, void *userData);
     void setPresentationCallback(PresentationCallback callback, void *userData);
 
@@ -602,6 +607,7 @@ private:
     bool m_debugUiInitialized = false;
 
     FrameCompositor m_frameCompositor;
+    NativeFrameProvider m_nativeFrameProvider;
     PresentationCallback m_presentationCallback = nullptr;
     void *m_presentationUserData = nullptr;
 

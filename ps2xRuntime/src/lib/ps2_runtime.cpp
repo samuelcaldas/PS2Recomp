@@ -392,15 +392,20 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, PresentationState &state
                         uint32_t &outWidth, uint32_t &outHeight)
 {
 #if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
-    // The game has no independent native presentation pipeline yet. In
-    // particular, its map compositor consumes this GS frame for the HUD.
-    // Do not silently present GS output while claiming native rendering.
     (void)tex;
-    (void)rt;
-    (void)state;
-    (void)outWidth;
-    (void)outHeight;
-    throw std::runtime_error("Switch presentation unavailable: GS framebuffer fallback is disabled; native presentation is not implemented");
+    if (auto native = rt->nativePresentationFrame()) {
+        PS2PresentationFrameView view{native->pixels->data(), native->width, native->height, native->strideBytes};
+        if (!state.frame.update(view, [](auto) -> std::optional<PS2OwnedPresentationFrame> { return std::nullopt; }))
+            throw std::runtime_error("Switch native frame is invalid");
+    } else {
+        // Waiting for a native frame. No guest framebuffer is sampled.
+        state.frame.width = FB_WIDTH;
+        state.frame.height = DEFAULT_DISPLAY_HEIGHT;
+        state.frame.pixels.assign(size_t(FB_WIDTH) * DEFAULT_DISPLAY_HEIGHT * 4u, 0);
+        for (size_t i = 3; i < state.frame.pixels.size(); i += 4) state.frame.pixels[i] = 255;
+    }
+    outWidth = state.frame.width;
+    outHeight = state.frame.height;
 #else
     const uint64_t tick = rt->eeScheduler().currentVSyncTick();
     bool changed = false;
@@ -521,6 +526,24 @@ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
 void PS2Runtime::setFrameCompositor(FrameCompositor compositor)
 {
     m_frameCompositor = std::move(compositor);
+}
+
+void PS2Runtime::setNativeFrameProvider(NativeFrameProvider provider)
+{
+    m_nativeFrameProvider = std::move(provider);
+}
+
+std::optional<PS2OwnedPresentationFrame> PS2Runtime::nativePresentationFrame()
+{
+    if (!m_nativeFrameProvider) return std::nullopt;
+    auto frame = m_nativeFrameProvider();
+    if (!frame) return std::nullopt;
+    if (!frame->pixels || frame->width > 1920 || frame->height > 1080)
+        throw std::runtime_error("invalid native presentation frame");
+    auto bytes = PS2PresentationFrameBytes({frame->pixels->data(), frame->width, frame->height, frame->strideBytes});
+    if (!bytes || bytes > frame->pixels->size())
+        throw std::runtime_error("invalid native presentation storage");
+    return frame;
 }
 
 std::optional<PS2OwnedPresentationFrame> PS2Runtime::composePresentationFrame(PS2PresentationFrameView frame)
