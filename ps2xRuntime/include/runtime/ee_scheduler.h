@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <csetjmp>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -386,6 +387,7 @@ private:
     void makeDormant(GuestThread &thread);
     void removeFromWaitObject(GuestThread &thread);
     [[noreturn]] void blockCurrent(EeWaitState wait);
+    [[noreturn]] void transferDispatch();
     void makeReady(GuestThread &thread, int result, bool interruptSafe);
     void requestPreemptionIfHigher(const GuestThread &readyThread, bool interruptSafe);
     void applyPendingPreemption();
@@ -463,4 +465,8 @@ private:
     mutable std::mutex m_snapshotMutex;
     EeKernelSnapshot m_snapshot;
     uint64_t m_snapshotSequence = 0;
+
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    jmp_buf *m_dispatcherJumpBuf = nullptr;
+#endif
 };

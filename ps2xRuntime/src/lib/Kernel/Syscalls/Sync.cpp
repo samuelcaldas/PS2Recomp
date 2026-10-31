@@ -1,3 +1,6 @@
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
 #include "Common.h"
 #include "Sync.h"
 #include "runtime/ee_scheduler.h"
@@ -69,6 +72,11 @@ namespace ps2_syscalls
     void CreateSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t address = getRegU32(ctx, 4);
+#if defined(__SWITCH__)
+        char csbuf[128];
+        snprintf(csbuf, sizeof(csbuf), "[aoe2-switch] CreateSema: addr=0x%x\n", (unsigned)address);
+        svcOutputDebugString(csbuf, strlen(csbuf));
+#endif
         const auto *param = address == 0u ? nullptr : getEeGuestStruct<ee_sema_t>(rdram, address);
         if (!param)
         {
@@ -88,6 +96,11 @@ namespace ps2_syscalls
 
     void DeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+#if defined(__SWITCH__)
+        char dsbuf[128];
+        snprintf(dsbuf, sizeof(dsbuf), "[aoe2-switch] DeleteSema: id=%d\n", (int)getRegU32(ctx, 4));
+        svcOutputDebugString(dsbuf, strlen(dsbuf));
+#endif
         deleteSemaphoreImpl(rdram, ctx, runtime, false);
     }
 

@@ -11,6 +11,9 @@
 #include <mutex>
 #include <optional>
 #include <vector>
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
 
 namespace
 {
@@ -170,8 +173,20 @@ namespace ps2_game_overrides
             const char *name = (descriptor.name && descriptor.name[0] != '\0')
                                    ? descriptor.name
                                    : "unnamed";
+#if defined(__SWITCH__)
+            {
+                std::string sw_msg = std::string("[game_overrides] applying '") + name + "'\n";
+                svcOutputDebugString(sw_msg.c_str(), sw_msg.length());
+            }
+#endif
             RUNTIME_LOG("[game_overrides] applying '" << name << "'");
             descriptor.apply(runtime);
+#if defined(__SWITCH__)
+            {
+                std::string sw_msg = std::string("[game_overrides] finished '") + name + "'\n";
+                svcOutputDebugString(sw_msg.c_str(), sw_msg.length());
+            }
+#endif
             ++appliedCount;
         }
 

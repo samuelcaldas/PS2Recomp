@@ -116,6 +116,13 @@ inline void clear_runtime_log_entries()
 }
 }
 
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+#include <switch.h>
+#define PS2_SWITCH_LOG(text) svcOutputDebugString((text).c_str(), (text).length())
+#else
+#define PS2_SWITCH_LOG(text) do {} while (0)
+#endif
+
 #if PS2_RUNTIME_LOGS || AGRESSIVE_LOGS
 #define RUNTIME_LOG(x)                                                                                                  \
     do                                                                                                                  \

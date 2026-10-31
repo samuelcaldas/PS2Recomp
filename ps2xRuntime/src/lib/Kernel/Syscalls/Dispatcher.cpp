@@ -1,3 +1,6 @@
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
 #include "Common.h"
 #include "Dispatcher.h"
 #include "System.h"
@@ -60,6 +63,11 @@ namespace ps2_syscalls
 
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+#if defined(__SWITCH__)
+        char sbuf[128];
+        snprintf(sbuf, sizeof(sbuf), "[aoe2-switch] dispatchNumericSyscall ENTER no=0x%x a0=0x%x\n", syscallNumber, getRegU32(ctx, 4));
+        svcOutputDebugString(sbuf, strlen(sbuf));
+#endif
         // Traced before overrides: the guest can install its own handlers (SetSyscall),
         // and those must show up here too.
         const SemaphoreSyscallTrace semaphoreTrace(syscallNumber, ctx);
@@ -67,6 +75,11 @@ namespace ps2_syscalls
             std::cerr << "[syscall] no=0x" << std::hex << syscallNumber << " a0=0x" << getRegU32(ctx, 4)
                       << " pc=0x" << ctx->pc << " ra=0x" << getRegU32(ctx, 31) << std::dec << std::endl;
         });
+#if defined(__SWITCH__)
+        char sdbuf[128];
+        snprintf(sdbuf, sizeof(sdbuf), "[aoe2-switch] dispatchNumericSyscall: sc=0x%x\n", (unsigned)syscallNumber);
+        svcOutputDebugString(sdbuf, strlen(sdbuf));
+#endif
         if (dispatchSyscallOverride(syscallNumber, rdram, ctx, runtime))
         {
             return true;

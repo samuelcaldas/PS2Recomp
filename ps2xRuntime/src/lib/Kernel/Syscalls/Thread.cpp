@@ -1,6 +1,9 @@
 #include "Common.h"
 #include "Thread.h"
 #include "runtime/ee_scheduler.h"
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
 
 namespace ps2_syscalls
 {
@@ -188,6 +191,11 @@ namespace ps2_syscalls
     void CreateThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t address = getRegU32(ctx, 4);
+#if defined(__SWITCH__)
+        char ctbuf[256];
+        snprintf(ctbuf, sizeof(ctbuf), "[aoe2-switch] CreateThread: param_addr=0x%x\n", (unsigned)address);
+        svcOutputDebugString(ctbuf, strlen(ctbuf));
+#endif
         if (address == 0u)
         {
             setReturnS32(ctx, KE_ERROR);
@@ -196,12 +204,26 @@ namespace ps2_syscalls
         const auto *param = getEeGuestStruct<ee_thread_t>(rdram, address);
         if (!param)
         {
+#if defined(__SWITCH__)
+            svcOutputDebugString("[aoe2-switch] CreateThread: getEeGuestStruct returned null!\n", 58);
+#endif
             setReturnS32(ctx, KE_ERROR);
             return;
         }
 
+#if defined(__SWITCH__)
+        snprintf(ctbuf, sizeof(ctbuf),
+                 "[aoe2-switch] CreateThread: func=0x%x stack=0x%x size=%d gp=0x%x prio=%d\n",
+                 (unsigned)param->func, (unsigned)param->stack, (int)param->stack_size,
+                 (unsigned)param->gp_reg, (int)param->initial_priority);
+        svcOutputDebugString(ctbuf, strlen(ctbuf));
+#endif
+
         if (param->stack_size < 0)
         {
+#if defined(__SWITCH__)
+            svcOutputDebugString("[aoe2-switch] CreateThread: stack_size < 0!\n", 44);
+#endif
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -214,6 +236,12 @@ namespace ps2_syscalls
                                      stackOffset,
                                      scratch))
             {
+#if defined(__SWITCH__)
+                snprintf(ctbuf, sizeof(ctbuf),
+                         "[aoe2-switch] CreateThread: resolveEeGuestRange FAILED for stack=0x%x size=%d!\n",
+                         (unsigned)param->stack, (int)param->stack_size);
+                svcOutputDebugString(ctbuf, strlen(ctbuf));
+#endif
                 setReturnS32(ctx, KE_ERROR);
                 return;
             }
@@ -230,7 +258,12 @@ namespace ps2_syscalls
             param->initial_priority,
             param->option,
         };
-        setReturnS32(ctx, scheduler(rdram, ctx, runtime).createThread(decoded));
+        const int createdId = scheduler(rdram, ctx, runtime).createThread(decoded);
+#if defined(__SWITCH__)
+        snprintf(ctbuf, sizeof(ctbuf), "[aoe2-switch] CreateThread: returned id=%d\n", createdId);
+        svcOutputDebugString(ctbuf, strlen(ctbuf));
+#endif
+        setReturnS32(ctx, createdId);
     }
 
     void DeleteThread(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

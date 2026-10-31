@@ -19,9 +19,11 @@ public:
     }
 
     bool Initialize() {
+        svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter::Initialize ENTER\n", 53);
         if (m_initialized) return true;
         NWindow* win = nwindowGetDefault();
         if (!win) {
+            svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: nwindowGetDefault null\n", 58);
             std::cerr << "[SwitchGlesPresenter] Error: nwindowGetDefault() returned null\n";
             return false;
         }
@@ -30,17 +32,21 @@ public:
         m_winWidth = (op_mode == AppletOperationMode_Console) ? 1920 : 1280;
         m_winHeight = (op_mode == AppletOperationMode_Console) ? 1080 : 720;
         nwindowSetDimensions(win, m_winWidth, m_winHeight);
+        svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: dimensions set\n", 51);
 
         m_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
         if (!m_display) {
+            svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: eglGetDisplay failed\n", 56);
             std::cerr << "[SwitchGlesPresenter] eglGetDisplay failed\n";
             return false;
         }
 
         if (!eglInitialize(m_display, nullptr, nullptr)) {
+            svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: eglInitialize failed\n", 56);
             std::cerr << "[SwitchGlesPresenter] eglInitialize failed\n";
             return false;
         }
+        svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: eglInitialize SUCCESS\n", 57);
 
         if (eglBindAPI(EGL_OPENGL_ES_API) == EGL_FALSE) {
             std::cerr << "[SwitchGlesPresenter] eglBindAPI failed\n";
@@ -64,9 +70,11 @@ public:
 
         m_surface = eglCreateWindowSurface(m_display, config, win, nullptr);
         if (!m_surface) {
+            svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: eglCreateWindowSurface failed\n", 64);
             std::cerr << "[SwitchGlesPresenter] eglCreateWindowSurface failed\n";
             return false;
         }
+        svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: eglCreateWindowSurface SUCCESS\n", 65);
 
         static const EGLint ctxAttribs[] = {
             EGL_CONTEXT_CLIENT_VERSION, 2,
@@ -74,14 +82,18 @@ public:
         };
         m_context = eglCreateContext(m_display, config, EGL_NO_CONTEXT, ctxAttribs);
         if (!m_context) {
+            svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: eglCreateContext failed\n", 60);
             std::cerr << "[SwitchGlesPresenter] eglCreateContext failed\n";
             return false;
         }
+        svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: eglCreateContext SUCCESS\n", 61);
 
         if (!eglMakeCurrent(m_display, m_surface, m_surface, m_context)) {
+            svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: eglMakeCurrent failed\n", 58);
             std::cerr << "[SwitchGlesPresenter] eglMakeCurrent failed\n";
             return false;
         }
+        svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: eglMakeCurrent SUCCESS\n", 59);
 
         eglSwapInterval(m_display, 1);
 
@@ -186,6 +198,7 @@ public:
         glGenBuffers(1, &m_vbo);
 
         m_initialized = true;
+        svcOutputDebugString("[aoe2-switch] SwitchGlesPresenter: INITIALIZED FULLY SUCCESS\n", 62);
         std::cout << "[SwitchGlesPresenter] Initialized native EGL/GLES2 display ("
                   << m_winWidth << "x" << m_winHeight << ")\n";
         return true;
@@ -264,7 +277,15 @@ public:
         glDisableVertexAttribArray(m_uvAttr);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+        static uint32_t s_presentCount = 0;
+        s_presentCount++;
+        if (s_presentCount <= 3 || s_presentCount % 60 == 0) {
+            svcOutputDebugString("[aoe2-switch] Present: before eglSwapBuffers\n", 45);
+        }
         eglSwapBuffers(m_display, m_surface);
+        if (s_presentCount <= 3 || s_presentCount % 60 == 0) {
+            svcOutputDebugString("[aoe2-switch] Present: after eglSwapBuffers\n", 44);
+        }
     }
 
     void Shutdown() {

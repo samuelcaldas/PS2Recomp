@@ -1,6 +1,10 @@
 #include "Common.h"
 #include "Pad.h"
 
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+#include <switch.h>
+#endif
+
 namespace ps2_stubs
 {
     namespace
@@ -96,6 +100,47 @@ namespace ps2_stubs
 
         void applyGamepadState(PadInputState &state)
         {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+            static PadState s_switchPad;
+            static bool s_switchPadInit = false;
+            if (!s_switchPadInit)
+            {
+                padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+                padInitializeAny(&s_switchPad);
+                s_switchPadInit = true;
+            }
+            padUpdate(&s_switchPad);
+            const uint64_t keys = padGetButtons(&s_switchPad);
+            if (keys & HidNpadButton_Up)    setButton(state, kPadBtnUp, true);
+            if (keys & HidNpadButton_Down)  setButton(state, kPadBtnDown, true);
+            if (keys & HidNpadButton_Left)  setButton(state, kPadBtnLeft, true);
+            if (keys & HidNpadButton_Right) setButton(state, kPadBtnRight, true);
+            if (keys & HidNpadButton_A)     setButton(state, kPadBtnCircle, true);
+            if (keys & HidNpadButton_B)     setButton(state, kPadBtnCross, true);
+            if (keys & HidNpadButton_X)     setButton(state, kPadBtnTriangle, true);
+            if (keys & HidNpadButton_Y)     setButton(state, kPadBtnSquare, true);
+            if (keys & HidNpadButton_L)     setButton(state, kPadBtnL1, true);
+            if (keys & HidNpadButton_R)     setButton(state, kPadBtnR1, true);
+            if (keys & HidNpadButton_ZL)    setButton(state, kPadBtnL2, true);
+            if (keys & HidNpadButton_ZR)    setButton(state, kPadBtnR2, true);
+            if (keys & HidNpadButton_Plus)  setButton(state, kPadBtnStart, true);
+            if (keys & HidNpadButton_Minus) setButton(state, kPadBtnSelect, true);
+            if (keys & HidNpadButton_StickL) setButton(state, kPadBtnL3, true);
+            if (keys & HidNpadButton_StickR) setButton(state, kPadBtnR3, true);
+            const HidAnalogStickState lstick = padGetStickPos(&s_switchPad, 0);
+            const HidAnalogStickState rstick = padGetStickPos(&s_switchPad, 1);
+            if (lstick.x != 0 || lstick.y != 0)
+            {
+                state.lx = axisToByte(static_cast<float>(lstick.x) / 32767.0f);
+                state.ly = axisToByte(-static_cast<float>(lstick.y) / 32767.0f);
+            }
+            if (rstick.x != 0 || rstick.y != 0)
+            {
+                state.rx = axisToByte(static_cast<float>(rstick.x) / 32767.0f);
+                state.ry = axisToByte(-static_cast<float>(rstick.y) / 32767.0f);
+            }
+            return;
+#endif
             if (!IsWindowReady())
             {
                 return;

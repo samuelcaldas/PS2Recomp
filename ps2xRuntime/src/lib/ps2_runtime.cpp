@@ -16,6 +16,8 @@
 #include "ps2x/iop/iop_subsystem.h"
 #if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
 #include "ps2_switch_presenter.h"
+#include <switch.h>
+extern "C" void (*switch_get_early_terminate_handler(void))(void);
 #endif
 
 #include <cstdlib>
@@ -311,7 +313,7 @@ namespace
             return {};
         }
 
-#if defined(PLATFORM_VITA)
+#if defined(PLATFORM_VITA) || defined(PLATFORM_SWITCH) || defined(__SWITCH__)
         const std::string generic = path.generic_string();
         const std::size_t colon = generic.find(':');
         if (colon != std::string::npos && colon != 0u)
@@ -393,7 +395,16 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, PresentationState &state
     bool changed = false;
     if (!state.latched || tick != state.lastTick)
     {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        char tbuf[96];
+        snprintf(tbuf, sizeof(tbuf), "[aoe2-switch] UF: tick %llu != %llu -> latch ENTER\n",
+                 (unsigned long long)tick, (unsigned long long)state.lastTick);
+        svcOutputDebugString(tbuf, strlen(tbuf));
+#endif
         rt->gs().latchHostPresentationFrame();
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        svcOutputDebugString("[aoe2-switch] UF: latch SUCCESS\n", 32);
+#endif
         state.lastTick = tick;
         state.latched = true;
         std::vector<uint8_t> snapshot;
@@ -402,17 +413,38 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, PresentationState &state
             width && height && uint64_t(width) * 4u <= UINT32_MAX &&
             uint64_t(width) * height * 4u <= snapshot.size())
         {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+            svcOutputDebugString("[aoe2-switch] UF: copyLatched SUCCESS -> state.frame.update ENTER\n", 67);
+#endif
             // GS has copied the frame under its own lock. Composition sees only
             // this immutable host snapshot, before any graphics upload or draw.
             changed = state.frame.update({snapshot.data(), width, height, width * 4u},
-                [rt](auto view) { return rt->composePresentationFrame(view); });
+                [rt](auto view) {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+                    svcOutputDebugString("[aoe2-switch] UF: composePresentationFrame ENTER\n", 49);
+#endif
+                    auto r = rt->composePresentationFrame(view);
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+                    svcOutputDebugString("[aoe2-switch] UF: composePresentationFrame DONE\n", 48);
+#endif
+                    return r;
+                });
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+            svcOutputDebugString("[aoe2-switch] UF: state.frame.update DONE\n", 42);
+#endif
         }
     }
     if (state.frame.pixels.empty())
     {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        svcOutputDebugString("[aoe2-switch] UploadFrame: pixels IS EMPTY, resizing\n", 52);
+#endif
         state.frame.width = FB_WIDTH;
         state.frame.height = DEFAULT_DISPLAY_HEIGHT;
         state.frame.pixels.resize(size_t(FB_WIDTH) * DEFAULT_DISPLAY_HEIGHT * 4u);
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        svcOutputDebugString("[aoe2-switch] UploadFrame: pixels resized successfully\n", 56);
+#endif
         for (size_t i = 0; i < state.frame.pixels.size(); i += 4)
         {
             state.frame.pixels[i] = 255;
@@ -421,6 +453,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, PresentationState &state
         }
         changed = true;
     }
+
 #if !defined(PLATFORM_SWITCH) && !defined(__SWITCH__)
     if (changed)
     {
@@ -1289,6 +1322,12 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
                                        GuestBranchKind kind,
                                        const char *debugName)
 {
+#if defined(__SWITCH__)
+    char mfbuf[128];
+    snprintf(mfbuf, sizeof(mfbuf), "[aoe2-switch] MISSING FUNCTION: tgt=0x%x src=0x%x name=%s\n",
+             (unsigned)targetPc, (unsigned)sourcePc, debugName ? debugName : "null");
+    svcOutputDebugString(mfbuf, strlen(mfbuf));
+#endif
     const MissingFunctionPolicy policy = missingFunctionPolicy();
     const bool firstReport = !m_missingFunctionReported.exchange(true, std::memory_order_acq_rel);
 
@@ -1499,6 +1538,16 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false;
     }
 
+#if defined(__SWITCH__)
+    static int s_branchTraceCount = 0;
+    if (s_branchTraceCount < 50) {
+        char brbuf[128];
+        snprintf(brbuf, sizeof(brbuf), "[aoe2-switch] dispatchGuestBranch: src=0x%x tgt=0x%x fall=0x%x\n",
+                 (unsigned)sourcePc, (unsigned)targetPc, (unsigned)fallthroughPc);
+        svcOutputDebugString(brbuf, strlen(brbuf));
+        s_branchTraceCount++;
+    }
+#endif
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
     targetFn(rdram, ctx, this);
@@ -1603,6 +1652,12 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx)
 
 void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encodedSyscallId)
 {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    char buf[128];
+    uint32_t scNum = (encodedSyscallId != 0u) ? encodedSyscallId : getRegU32(ctx, 3);
+    snprintf(buf, sizeof(buf), "[aoe2-switch] handleSyscall sc=0x%x pc=0x%x\n", scNum, ctx->pc);
+    svcOutputDebugString(buf, strlen(buf));
+#endif
     if (ctx->in_delay_slot)
     {
         throw std::runtime_error("Attempted to execute a syscall inside a branch delay slot! "
@@ -2654,31 +2709,51 @@ void PS2Runtime::run()
     std::thread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        std::set_terminate(switch_get_early_terminate_handler());
+        svcOutputDebugString("[aoe2-switch] gameThread START\n", 30);
+#endif
         try
         {
             m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+            svcOutputDebugString("[aoe2-switch] m_eeScheduler reset SUCCESS\n", 42);
+#endif
             m_eeScheduler->run();
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+            svcOutputDebugString("[aoe2-switch] m_eeScheduler run SUCCESS\n", 40);
+#endif
             uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
             RUNTIME_LOG("Game thread returned. PC=0x" << std::hex << pc
                       << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl);
         }
         catch (const std::exception &e)
         {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+            std::string err = std::string("[FATAL-GAME-THREAD] Exception: ") + e.what() + "\n";
+            svcOutputDebugString(err.c_str(), err.length());
+#endif
             std::cerr << "Error during program execution: " << e.what() << std::endl;
         }
         catch (...)
         {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+            svcOutputDebugString("[FATAL-GAME-THREAD] Unknown exception\n", 39);
+#endif
             std::cerr << "Error during program execution: unknown exception" << std::endl;
         }
         gameThreadFinished.store(true, std::memory_order_release); });
 
     PresentationState presentation;
     uint64_t tick = 0;
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    svcOutputDebugString("[aoe2-switch] Entering presentation loop\n", 41);
+#endif
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
         PS2_IF_AGRESSIVE_LOGS({
             tick++;
-            if ((tick % 120) == 0)
+            if (tick == 1 || (tick % 60) == 0)
             {
                 uint64_t curDma = m_memory.dmaStartCount();
                 uint64_t curGif = m_memory.gifCopyCount();
@@ -2726,12 +2801,27 @@ void PS2Runtime::run()
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
 #if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        static uint32_t s_presentCount = 0;
+        s_presentCount++;
+        char pbuf[96];
+        if (s_presentCount <= 3 || s_presentCount % 60 == 0) {
+            snprintf(pbuf, sizeof(pbuf), "[aoe2-switch] Loop %u: UF ENTER\n", s_presentCount);
+            svcOutputDebugString(pbuf, strlen(pbuf));
+        }
         Texture2D dummyTex{};
         UploadFrame(dummyTex, this, presentation, presentWidth, presentHeight);
+        if (s_presentCount <= 3 || s_presentCount % 60 == 0) {
+            snprintf(pbuf, sizeof(pbuf), "[aoe2-switch] Loop %u: UF DONE -> Present ENTER\n", s_presentCount);
+            svcOutputDebugString(pbuf, strlen(pbuf));
+        }
         m_presentedFrameWidth.store(presentWidth, std::memory_order_release);
         m_presentedFrameHeight.store(presentHeight, std::memory_order_release);
 
         SwitchGlesPresenter::Instance().Present(presentation.frame.pixels.data(), presentWidth, presentHeight, presentWidth, presentHeight, presentWidth * 4u);
+        if (s_presentCount <= 3 || s_presentCount % 60 == 0) {
+            snprintf(pbuf, sizeof(pbuf), "[aoe2-switch] Loop %u: Present DONE -> applet ENTER\n", s_presentCount);
+            svcOutputDebugString(pbuf, strlen(pbuf));
+        }
         if (m_presentationCallback)
         {
             m_presentationCallback(*this, m_presentationUserData);
@@ -2742,6 +2832,10 @@ void PS2Runtime::run()
             RUNTIME_LOG("[run] appletMainLoop requested exit, breaking out of loop");
             requestStop();
             break;
+        }
+        if (s_presentCount <= 3 || s_presentCount % 60 == 0) {
+            snprintf(pbuf, sizeof(pbuf), "[aoe2-switch] Loop %u: applet DONE\n", s_presentCount);
+            svcOutputDebugString(pbuf, strlen(pbuf));
         }
 #else
         UploadFrame(frameTex, this, presentation, presentWidth, presentHeight);

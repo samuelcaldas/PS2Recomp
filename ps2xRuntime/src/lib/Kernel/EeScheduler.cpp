@@ -8,6 +8,9 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+#include <switch.h>
+#endif
 
 namespace
 {
@@ -159,6 +162,9 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
 
 void EeScheduler::run()
 {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    svcOutputDebugString("[aoe2-switch] EeScheduler::run ENTER\n", 38);
+#endif
     assertExecutor();
     m_running.store(true, std::memory_order_release);
 
@@ -217,6 +223,20 @@ void EeScheduler::run()
         {
             auto completion = std::move(running->resumeCompletion);
             running->resumeCompletion = {};
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+            jmp_buf jb;
+            jmp_buf *prevJb = m_dispatcherJumpBuf;
+            m_dispatcherJumpBuf = &jb;
+            if (setjmp(jb) == 0)
+            {
+                completion(running->activeContext());
+                m_dispatcherJumpBuf = prevJb;
+            }
+            else
+            {
+                m_dispatcherJumpBuf = prevJb;
+            }
+#else
             try
             {
                 completion(running->activeContext());
@@ -224,6 +244,7 @@ void EeScheduler::run()
             catch (const EeDispatcherTransfer &)
             {
             }
+#endif
             if (m_currentThreadId == 0)
             {
                 continue;
@@ -251,6 +272,20 @@ void EeScheduler::run()
                 running->invocations.pop_back();
                 if (completed.onComplete)
                 {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+                    jmp_buf jb;
+                    jmp_buf *prevJb = m_dispatcherJumpBuf;
+                    m_dispatcherJumpBuf = &jb;
+                    if (setjmp(jb) == 0)
+                    {
+                        completed.onComplete(completed.context, running->activeContext());
+                        m_dispatcherJumpBuf = prevJb;
+                    }
+                    else
+                    {
+                        m_dispatcherJumpBuf = prevJb;
+                    }
+#else
                     try
                     {
                         completed.onComplete(completed.context, running->activeContext());
@@ -258,6 +293,7 @@ void EeScheduler::run()
                     catch (const EeDispatcherTransfer &)
                     {
                     }
+#endif
                 }
                 continue;
             }
@@ -273,6 +309,12 @@ void EeScheduler::run()
         {
             GuestInvocation invocation = std::move(m_pendingInvocations.front());
             m_pendingInvocations.pop_front();
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+            char pbuf[128];
+            snprintf(pbuf, sizeof(pbuf), "[aoe2-switch] popping pendingInvocation pc=0x%x kind=%d sp=0x%x\n",
+                     invocation.context.pc, (int)invocation.kind, getRegU32(&invocation.context, 29));
+            svcOutputDebugString(pbuf, strlen(pbuf));
+#endif
             if (getRegU32(&invocation.context, 29) == 0u)
             {
                 SET_GPR_U32(&invocation.context, 29, invocationStackTop());
@@ -301,12 +343,49 @@ void EeScheduler::run()
             continue;
         }
         PS2Runtime::RecompiledFunction function = m_runtime.lookupFunction(context.pc);
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        static int s_dispatchCount = 0;
+        if (s_dispatchCount < 10) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "[aoe2-switch] EeScheduler: dispatch [%d] ENTER pc=0x%x func=%p rdram=%p\n",
+                     s_dispatchCount, (unsigned)context.pc, (void*)function, (void*)m_rdram);
+            svcOutputDebugString(buf, strlen(buf));
+        }
+#endif
 
         if (checkpointDue(kGuestDispatchCycles))
         {
             continue;
         }
 
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        jmp_buf jb;
+        jmp_buf *prevJb = m_dispatcherJumpBuf;
+        m_dispatcherJumpBuf = &jb;
+        m_insideInterrupt = !running->invocations.empty() && defersPreemption(running->invocations.back().kind);
+        m_unwindingForCheckpoint = false;
+        m_guestExecuting.store(true, std::memory_order_release);
+        if (setjmp(jb) == 0)
+        {
+            const uint32_t dispatchedPc = context.pc;
+            function(m_rdram, &context, &m_runtime);
+            m_dispatcherJumpBuf = prevJb;
+            if (s_dispatchCount < 10) {
+                char buf[128];
+                snprintf(buf, sizeof(buf), "[aoe2-switch] EeScheduler: dispatch [%d] SUCCESS next_pc=0x%x\n",
+                         s_dispatchCount, (unsigned)context.pc);
+                svcOutputDebugString(buf, strlen(buf));
+                s_dispatchCount++;
+            }
+        }
+        else
+        {
+            m_dispatcherJumpBuf = prevJb;
+            svcOutputDebugString("[aoe2-switch] EeScheduler: transferDispatch returned to dispatch loop\n", 71);
+        }
+        m_guestExecuting.store(false, std::memory_order_release);
+        m_insideInterrupt = false;
+#else
         try
         {
             m_insideInterrupt = !running->invocations.empty() && defersPreemption(running->invocations.back().kind);
@@ -330,6 +409,13 @@ void EeScheduler::run()
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }
+        catch (const std::exception &e)
+        {
+            m_guestExecuting.store(false, std::memory_order_release);
+            m_running.store(false, std::memory_order_release);
+            publishSnapshot();
+            throw;
+        }
         catch (...)
         {
             m_guestExecuting.store(false, std::memory_order_release);
@@ -337,6 +423,7 @@ void EeScheduler::run()
             publishSnapshot();
             throw;
         }
+#endif
 
         processPendingEvents();
         const GuestThread *activeThread = currentThread();
@@ -454,7 +541,12 @@ void EeScheduler::setupCurrentThread(uint32_t stack, uint32_t stackSize, uint32_
 int EeScheduler::createThread(const EeThreadCreateParams &params)
 {
     assertExecutor();
-    if (params.priority < 1 || params.priority >= kPriorityCount)
+    int priority = params.priority;
+    if (priority == 0)
+    {
+        priority = 1;
+    }
+    if (priority < 1 || priority >= kPriorityCount)
     {
         return KE_ILLEGAL_PRIORITY;
     }
@@ -473,8 +565,8 @@ int EeScheduler::createThread(const EeThreadCreateParams &params)
     thread.gp = params.gp;
     thread.attr = params.attr;
     thread.option = params.option;
-    thread.initialPriority = params.priority;
-    thread.currentPriority = params.priority;
+    thread.initialPriority = priority;
+    thread.currentPriority = priority;
     thread.status = EeThreadStatus::Dormant;
     m_threads.emplace(id, std::move(thread));
     publishSnapshot();
@@ -539,6 +631,20 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     return KE_OK;
 }
 
+[[noreturn]] void EeScheduler::transferDispatch()
+{
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    if (m_dispatcherJumpBuf != nullptr)
+    {
+        longjmp(*m_dispatcherJumpBuf, 1);
+    }
+    svcOutputDebugString("[aoe2-switch] FATAL: transferDispatch called without active jmp_buf!\n", 67);
+    abort();
+#else
+    throw EeDispatcherTransfer{};
+#endif
+}
+
 [[noreturn]] void EeScheduler::exitCurrent(bool deleteThreadRecord)
 {
     assertExecutor();
@@ -557,7 +663,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
         m_runtime.guestFree(ownedStack);
     }
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    transferDispatch();
 }
 
 int EeScheduler::terminateThread(int id, uint32_t &ownedStack, bool interruptSafe)
@@ -846,7 +952,7 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    transferDispatch();
 }
 
 int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uint32_t option)
@@ -1152,6 +1258,12 @@ int EeScheduler::cancelAlarm(int id)
 void EeScheduler::queueInvocation(GuestInvocation invocation)
 {
     assertExecutor();
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    char qbuf[128];
+    snprintf(qbuf, sizeof(qbuf), "[aoe2-switch] queueInvocation: pc=0x%x kind=%d pending=%zu\n",
+             invocation.context.pc, (int)invocation.kind, m_pendingInvocations.size());
+    svcOutputDebugString(qbuf, strlen(qbuf));
+#endif
     invocation.sequence = ++m_invocationSequence;
     m_pendingInvocations.push_back(std::move(invocation));
     m_checkpointPending.store(true, std::memory_order_release);
@@ -1159,8 +1271,19 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
 
 [[noreturn]] void EeScheduler::invokeCurrent(GuestInvocation invocation)
 {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    svcOutputDebugString("[aoe2-switch] invokeCurrent ENTER\n", 35);
+#endif
     assertExecutor();
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    svcOutputDebugString("[aoe2-switch] invokeCurrent assertExecutor passed\n", 51);
+#endif
     GuestThread *owner = currentThread();
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    char tbuf[128];
+    snprintf(tbuf, sizeof(tbuf), "[aoe2-switch] invokeCurrent owner=%p\n", (void*)owner);
+    svcOutputDebugString(tbuf, strlen(tbuf));
+#endif
     assert(owner != nullptr);
     if (getRegU32(&invocation.context, 29) == 0u)
     {
@@ -1169,7 +1292,10 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     invocation.sequence = ++m_invocationSequence;
     owner->invocations.push_back(std::move(invocation));
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    svcOutputDebugString("[aoe2-switch] invokeCurrent transferring to dispatcher\n", 55);
+#endif
+    transferDispatch();
 }
 
 [[noreturn]] void EeScheduler::invokeCurrentSequence(std::vector<GuestInvocation> invocations)
@@ -1188,7 +1314,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
         owner->invocations.push_back(std::move(*it));
     }
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    transferDispatch();
 }
 
 bool EeScheduler::hasInvocation(GuestInvocationKind kind, uint64_t tag) const
@@ -1209,8 +1335,17 @@ uint32_t EeScheduler::invocationStackTop()
 {
     assertExecutor();
     const GuestThread *owner = currentThread();
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    char sbuf[128];
+    snprintf(sbuf, sizeof(sbuf), "[aoe2-switch] invocationStackTop: owner=%p id=%d\n",
+             (void*)owner, owner ? owner->id : -1);
+    svcOutputDebugString(sbuf, strlen(sbuf));
+#endif
     if (!owner)
     {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        svcOutputDebugString("[aoe2-switch] FATAL: invocationStackTop without owner!\n", 54);
+#endif
         throw std::logic_error("EE invocation stack requested without a current guest context");
     }
     const size_t depth = owner ? owner->invocations.size() : 0u;
@@ -1223,8 +1358,16 @@ uint32_t EeScheduler::invocationStackTop()
     }
     constexpr uint32_t kInvocationStackSize = 0x4000u;
     const uint32_t top = m_runtime.reserveAsyncCallbackStack(kInvocationStackSize, 16u);
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+    snprintf(sbuf, sizeof(sbuf), "[aoe2-switch] invocationStackTop: reserved top=0x%x depth=%zu\n",
+             (unsigned)top, depth);
+    svcOutputDebugString(sbuf, strlen(sbuf));
+#endif
     if (top == 0u)
     {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        svcOutputDebugString("[aoe2-switch] FATAL: invocation stack space exhausted!\n", 55);
+#endif
         throw std::runtime_error("EE invocation stack space exhausted");
     }
     m_invocationStackTops.emplace(key, top);
@@ -1335,6 +1478,11 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause, std::function<void()> a
               { return left.order < right.order; });
     for (const EeIrqHandler &handler : matching)
     {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        char ibuf[128];
+        snprintf(ibuf, sizeof(ibuf), "[aoe2-switch] dispatchIrq: matched handler=0x%x cause=%u\n", handler.handler, cause);
+        svcOutputDebugString(ibuf, strlen(ibuf));
+#endif
         GuestInvocation invocation{};
         invocation.kind = GuestInvocationKind::Interrupt;
         invocation.context.pc = handler.handler;
@@ -1763,7 +1911,7 @@ void EeScheduler::blockCurrent(EeWaitState wait)
     self->status = self->suspendCount == 0 ? EeThreadStatus::Waiting : EeThreadStatus::WaitingSuspended;
     m_currentThreadId = 0;
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    transferDispatch();
 }
 
 void EeScheduler::makeReady(GuestThread &item, int result, bool interruptSafe)
@@ -1970,6 +2118,11 @@ void EeScheduler::processEvent(const EeEvent &event)
         completeVSync(m_vsyncTick);
         if (m_gsVSyncCallback != 0u && m_runtime.hasFunction(m_gsVSyncCallback))
         {
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+            char vbuf[128];
+            snprintf(vbuf, sizeof(vbuf), "[aoe2-switch] VBlankStart queueing GsCallback pc=0x%x\n", m_gsVSyncCallback);
+            svcOutputDebugString(vbuf, strlen(vbuf));
+#endif
             GuestInvocation invocation{};
             invocation.kind = GuestInvocationKind::GsCallback;
             invocation.context.pc = m_gsVSyncCallback;
@@ -1979,7 +2132,13 @@ void EeScheduler::processEvent(const EeEvent &event)
             SET_GPR_U32(&invocation.context, 31, 0u);
             queueInvocation(std::move(invocation));
         }
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        svcOutputDebugString("[aoe2-switch] VBlankStart dispatching Irq cause=2\n", 50);
+#endif
         dispatchIrq(false, 2u);
+#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+        svcOutputDebugString("[aoe2-switch] VBlankStart dispatchIrq finished\n", 47);
+#endif
         break;
     case EeEventType::ExternalWake:
         completeExternalWait(event.id, event.value, KE_OK);

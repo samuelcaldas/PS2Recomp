@@ -1,5 +1,8 @@
 #include "Common.h"
 #include "System.h"
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
 
 namespace ps2_syscalls
 {
@@ -325,6 +328,12 @@ namespace ps2_syscalls
 
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t encodedSyscallId)
     {
+#if defined(__SWITCH__)
+        char tobuf[128];
+        snprintf(tobuf, sizeof(tobuf), "[aoe2-switch] Syscall TODO reached: enc=0x%x v1=0x%x pc=0x%x\n",
+                 (unsigned)encodedSyscallId, (unsigned)getRegU32(ctx, 3), (unsigned)ctx->pc);
+        svcOutputDebugString(tobuf, strlen(tobuf));
+#endif
         // a bit more detail mayber reomve old logic, lets get it more raw
         std::cerr << "[Syscall TODO]"
                   << " encoded=0x" << std::hex << encodedSyscallId
@@ -405,8 +414,7 @@ namespace ps2_syscalls
 
         if (!runtime->hasFunction(handler))
         {
-            setReturnS32(ctx, KE_ERROR);
-            return true;
+            return false;
         }
 
         GuestInvocation invocation{};
@@ -420,7 +428,24 @@ namespace ps2_syscalls
         {
             parent.r[2] = completed.r[2];
         };
+#if defined(__SWITCH__)
+        char obuf[128];
+        snprintf(obuf, sizeof(obuf), "[aoe2-switch] dispatchSyscallOverride: handler=0x%x hasFn=%d (executing directly)\n",
+                 (unsigned)handler, runtime->hasFunction(handler) ? 1 : 0);
+        svcOutputDebugString(obuf, strlen(obuf));
+        auto fn = runtime->lookupFunction(handler);
+        if (fn) {
+            invocation.context.pc = handler;
+            fn(rdram, &invocation.context, runtime);
+            ctx->r[2] = invocation.context.r[2];
+            snprintf(obuf, sizeof(obuf), "[aoe2-switch] dispatchSyscallOverride: handler executed, v0=0x%x\n",
+                     (unsigned)GPR_U32(ctx, 2));
+            svcOutputDebugString(obuf, strlen(obuf));
+            return true;
+        }
+#endif
         scheduler.invokeCurrent(std::move(invocation));
+        return true;
     }
 
     static bool tryResolveGuestSyscallMirrorAddr(uint32_t syscallIndex, uint32_t &guestAddr)
@@ -463,9 +488,18 @@ namespace ps2_syscalls
     {
         const uint32_t syscallIndex = getRegU32(ctx, 4);
         const uint32_t handler = getRegU32(ctx, 5);
+        uint32_t oldHandler = 0;
+        runtime->findEeSyscallOverride(syscallIndex, oldHandler);
         runtime->setEeSyscallOverride(rdram, syscallIndex, handler);
 
-        setReturnS32(ctx, 0);
+#if defined(__SWITCH__)
+        char scbuf[128];
+        snprintf(scbuf, sizeof(scbuf), "[aoe2-switch] SetSyscall: idx=0x%x old=0x%x new=0x%x\n",
+                 (unsigned)syscallIndex, (unsigned)oldHandler, (unsigned)handler);
+        svcOutputDebugString(scbuf, strlen(scbuf));
+#endif
+
+        setReturnU32(ctx, oldHandler);
     }
 
     // 0x3C SetupThread
@@ -959,6 +993,11 @@ namespace ps2_syscalls
         const uint32_t dest = getRegU32(ctx, 4);
         const uint32_t src = getRegU32(ctx, 5);
         const uint32_t size = getRegU32(ctx, 6);
+#if defined(__SWITCH__)
+        char cbuf[128];
+        snprintf(cbuf, sizeof(cbuf), "[aoe2-switch] Copy ENTER dest=0x%x src=0x%x size=%u\n", (unsigned)dest, (unsigned)src, (unsigned)size);
+        svcOutputDebugString(cbuf, strlen(cbuf));
+#endif
 
         if (rdram && size > 0)
         {
@@ -976,13 +1015,27 @@ namespace ps2_syscalls
     void GetEntryAddress(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t syscallNum = getRegU32(ctx, 4);
-
-        const uint32_t entryAddr = kGuestSyscallTableGuestBase + (syscallNum * 4u);
         uint32_t handler = 0;
-        if (const uint8_t *ptr = getConstMemPtr(rdram, entryAddr))
+        if (runtime && runtime->findEeSyscallOverride(syscallNum, handler) && handler != 0)
         {
-            std::memcpy(&handler, ptr, sizeof(handler));
+            // Found in runtime overrides map
         }
+        else
+        {
+            const uint32_t entryAddr = kGuestSyscallTableGuestBase + (syscallNum * 4u);
+            if (const uint8_t *ptr = getConstMemPtr(rdram, entryAddr))
+            {
+                std::memcpy(&handler, ptr, sizeof(handler));
+            }
+        }
+
+#if defined(__SWITCH__)
+        char gebuf[128];
+        snprintf(gebuf, sizeof(gebuf), "[aoe2-switch] GetEntryAddress: sc=0x%x handler=0x%x\n",
+                 (unsigned)syscallNum, (unsigned)handler);
+        svcOutputDebugString(gebuf, strlen(gebuf));
+#endif
+
         setReturnU32(ctx, handler);
     }
 
