@@ -136,6 +136,9 @@ public:
                                           uint32_t *outDisplayFbp = nullptr,
                                           uint32_t *outSourceFbp = nullptr,
                                           bool *outUsedPreferred = nullptr) const;
+    bool captureHostUiFrame(std::vector<uint8_t> &outPixels,
+                            uint32_t &outWidth,
+                            uint32_t &outHeight);
     bool clearFramebufferContext(uint32_t contextIndex, uint32_t rgba);
     bool clearActiveFramebuffer(uint32_t rgba);
     uint64_t nativeImageUploadCount() const { return m_nativeImageUploadCount; }

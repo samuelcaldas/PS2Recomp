@@ -349,6 +349,7 @@ public:
     using NativeFrameProvider = std::function<std::optional<PS2OwnedPresentationFrame>()>;
     void setNativeFrameProvider(NativeFrameProvider provider);
     std::optional<PS2OwnedPresentationFrame> nativePresentationFrame();
+    bool captureHostUiFrame(std::vector<uint8_t> &outPixels, uint32_t &outWidth, uint32_t &outHeight);
 
     using PresentationCallback = void (*)(PS2Runtime &runtime, void *userData);
     void setPresentationCallback(PresentationCallback callback, void *userData);

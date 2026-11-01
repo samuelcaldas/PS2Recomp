@@ -647,6 +647,54 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
     return true;
 }
 
+bool GS::captureHostUiFrame(std::vector<uint8_t> &outPixels,
+                            uint32_t &outWidth,
+                            uint32_t &outHeight)
+{
+    GSPresentationRequest request{};
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        if (!m_backend || !m_privRegs)
+            return false;
+        request = buildPresentationRequestUnlocked();
+    }
+
+    PresentationFrame frame{};
+    {
+        std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+        if (m_backend)
+        {
+            m_backend->Flush();
+            m_backend->Sync(GSSyncReason::Presentation);
+            frame = m_backend->Present(request);
+        }
+    }
+
+    if (!frame || frame.pixels.empty() || frame.width == 0 || frame.height == 0)
+        return false;
+
+    outWidth = frame.width;
+    outHeight = frame.height;
+    const size_t packedRowBytes = static_cast<size_t>(outWidth) * 4u;
+    const size_t sourceRowBytes = static_cast<size_t>(kHostFrameWidth) * 4u;
+    outPixels.resize(packedRowBytes * static_cast<size_t>(outHeight));
+
+    for (uint32_t y = 0; y < outHeight; ++y)
+    {
+        const size_t srcOffset = static_cast<size_t>(y) * sourceRowBytes;
+        const size_t dstOffset = static_cast<size_t>(y) * packedRowBytes;
+        if (srcOffset + packedRowBytes > frame.pixels.size() ||
+            dstOffset + packedRowBytes > outPixels.size())
+        {
+            outPixels.clear();
+            outWidth = outHeight = 0;
+            return false;
+        }
+        std::memcpy(outPixels.data() + dstOffset, frame.pixels.data() + srcOffset, packedRowBytes);
+    }
+    return true;
+}
+
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);

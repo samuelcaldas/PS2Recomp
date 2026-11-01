@@ -546,6 +546,11 @@ std::optional<PS2OwnedPresentationFrame> PS2Runtime::nativePresentationFrame()
     return frame;
 }
 
+bool PS2Runtime::captureHostUiFrame(std::vector<uint8_t> &outPixels, uint32_t &outWidth, uint32_t &outHeight)
+{
+    return m_gs.captureHostUiFrame(outPixels, outWidth, outHeight);
+}
+
 std::optional<PS2OwnedPresentationFrame> PS2Runtime::composePresentationFrame(PS2PresentationFrameView frame)
 {
     const uint64_t inputBytes = PS2PresentationFrameBytes(frame);
