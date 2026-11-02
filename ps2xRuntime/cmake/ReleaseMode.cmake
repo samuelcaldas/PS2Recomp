@@ -34,8 +34,13 @@ function(EnableFastReleaseMode TargetName)
         endif()
     endif()
 
-    if(IPO_SUPPORTED)
+    # devkitA64 uses GCC to emit LTO objects but links Switch executables with
+    # lld, which does not load GCC's LTO plugin. Keep these static libraries
+    # as regular optimized objects so consumers can resolve their symbols.
+    if(IPO_SUPPORTED AND NOT CMAKE_CXX_COMPILER MATCHES "aarch64-none-elf")
         set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    elseif(IPO_SUPPORTED)
+        message(STATUS "Disabling IPO for devkitA64/lld compatibility: ${TargetName}")
     else()
         message(WARNING "Interprocedural optimization not supported: ${ipo_error}")
     endif()

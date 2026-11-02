@@ -1908,9 +1908,17 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
 {
     PresentationFrame result{};
     const GSPmodeState pmode = decodePmode(request.pmode);
+#if defined(__SWITCH__)
+    // Switch presents a complete GS framebuffer on a progressive display. Bob
+    // deinterlacing alternate PS2 fields makes the entire image jump by one
+    // source scanline on every VSync, so keep the complete frame stable here.
+    const bool fieldMode = false;
+    const bool oddField = false;
+#else
     const GSSmode2State smode2 = decodeSMode2(request.smode2);
     const bool fieldMode = smode2.interlaced && !smode2.frameMode;
     const bool oddField = (request.vsyncTick & 1ull) != 0ull;
+#endif
     const GSFrameReg displayFrame1 = decodeDisplayFrame(request.dispfb1);
     const GSFrameReg displayFrame2 = decodeDisplayFrame(request.dispfb2);
     const GSDisplayReadOrigin origin1 = decodeDisplayReadOrigin(request.dispfb1);
