@@ -338,7 +338,7 @@ void register_ps2_runtime_expansion_tests()
         tc.Run("map arena remains excluded across heap reconfiguration", [](TestCase &t)
         {
             PS2Runtime runtime;
-            constexpr uint32_t arenaBase = PS2_HLE_RESERVATION_BASE - 8u * 1024u * 1024u;
+            constexpr uint32_t arenaBase = PS2_MAP_ARENA_BASE;
             runtime.memory().initialize();
             auto *memory = runtime.memory().getRDRAM();
             memory[arenaBase] = 0x5au;
@@ -390,11 +390,13 @@ void register_ps2_runtime_expansion_tests()
                 runtime.memory().initialize();
                 auto *memory = runtime.memory().getRDRAM();
                 memory[PS2_HLE_RESERVATION_BASE] = 0xabu;
-                memory[PS2_MAP_ARENA_BASE] = 0xcdu;
+                if (PS2_MAP_ARENA_SIZE != 0u)
+                    memory[PS2_MAP_ARENA_BASE] = 0xcdu;
                 const bool valid = address == PS2_MAP_ARENA_BASE - 8u;
                 t.Equals(runtime.loadELF(path.string()), valid, "only a segment wholly below reservations loads");
                 t.Equals(memory[PS2_HLE_RESERVATION_BASE], uint8_t{0xab}, "reserved HLE bytes remain untouched");
-                t.Equals(memory[PS2_MAP_ARENA_BASE], uint8_t{0xcd}, "reserved map bytes remain untouched");
+                if (PS2_MAP_ARENA_SIZE != 0u)
+                    t.Equals(memory[PS2_MAP_ARENA_BASE], uint8_t{0xcd}, "reserved map bytes remain untouched");
             }
         });
 
