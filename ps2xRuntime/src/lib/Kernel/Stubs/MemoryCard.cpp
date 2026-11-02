@@ -74,6 +74,7 @@ namespace ps2_stubs
             FILE *file = nullptr;
             int32_t port = 0;
             std::filesystem::path hostPath;
+            uint64_t bytesWritten = 0;
         };
 
         struct McPortState
@@ -570,10 +571,12 @@ namespace ps2_stubs
             auto it = g_mcFiles.find(fd);
             if (it != g_mcFiles.end())
             {
-                if (!it->second.file || std::fclose(it->second.file) == 0)
-                {
-                    result = kMcResultSucceed;
-                }
+                const std::filesystem::path path = it->second.hostPath;
+                const uint64_t bytesWritten = it->second.bytesWritten;
+                const int closeResult = it->second.file ? std::fclose(it->second.file) : 0;
+                if (closeResult == 0) result = kMcResultSucceed;
+                RUNTIME_LOG("[MC] Close path='" << path.string() << "' bytes=" << bytesWritten
+                                                 << " result=" << (closeResult == 0 ? "ok" : "error"));
                 g_mcFiles.erase(it);
             }
             setMcCommandResultLocked(kMcCmdClose, result);
@@ -657,7 +660,10 @@ namespace ps2_stubs
             auto it = g_mcFiles.find(fd);
             if (it != g_mcFiles.end() && it->second.file)
             {
-                result = (std::fflush(it->second.file) == 0) ? kMcResultSucceed : kMcResultDeniedPermit;
+                const int flushResult = std::fflush(it->second.file);
+                result = (flushResult == 0) ? kMcResultSucceed : kMcResultDeniedPermit;
+                RUNTIME_LOG("[MC] Flush path='" << it->second.hostPath.string() << "' bytes=" << it->second.bytesWritten
+                                                 << " result=" << (flushResult == 0 ? "ok" : "error"));
             }
             setMcCommandResultLocked(kMcCmdFlush, result);
         }
@@ -1035,6 +1041,7 @@ namespace ps2_stubs
                                 std::fclose(file);
                             }
                         }
+                        RUNTIME_LOG("[MC] Open path='" << hostPath.string() << "' bytes=0 result=" << result);
                     }
                 }
             }
@@ -1289,16 +1296,16 @@ namespace ps2_stubs
             }
             else
             {
+                const std::filesystem::path path = it->second.hostPath;
                 const size_t bytesWritten = std::fwrite(src, 1u, static_cast<size_t>(size), it->second.file);
-                result = std::ferror(it->second.file) ? kMcResultDeniedPermit : static_cast<int32_t>(bytesWritten);
-                if (!std::ferror(it->second.file))
-                {
-                    std::fflush(it->second.file);
-                }
-                else
-                {
-                    std::clearerr(it->second.file);
-                }
+                it->second.bytesWritten += bytesWritten;
+                const bool writeOk = bytesWritten == static_cast<size_t>(size) && !std::ferror(it->second.file);
+                const int flushResult = writeOk ? std::fflush(it->second.file) : EOF;
+                result = (writeOk && flushResult == 0) ? static_cast<int32_t>(bytesWritten) : kMcResultDeniedPermit;
+                RUNTIME_LOG("[MC] Write path='" << path.string() << "' bytes=" << bytesWritten << " requested=" << size
+                                                 << " write=" << (writeOk ? "ok" : "error")
+                                                 << " flush=" << (flushResult == 0 ? "ok" : "error") << " result=" << result);
+                if (!writeOk) std::clearerr(it->second.file);
             }
 
             setMcCommandResultLocked(kMcCmdWrite, result);
