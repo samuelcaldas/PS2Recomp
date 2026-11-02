@@ -5,6 +5,14 @@
 void register_map_arena_tests()
 {
     MiniTest::Case("MapArena", [](TestCase &tc) {
+        if (PS2_MAP_ARENA_SIZE == 0u) {
+            tc.Run("claims are disabled without expanded viewport", [](TestCase &t) {
+                PS2Runtime rt;
+                int owner = 0;
+                t.IsTrue(!rt.claimMapArena(&owner), "disabled arena rejects claims");
+            });
+            return;
+        }
         tc.Run("exclusive idempotent claims and generations", [](TestCase &t) {
             PS2Runtime rt;
             int owner = 0, other = 0;

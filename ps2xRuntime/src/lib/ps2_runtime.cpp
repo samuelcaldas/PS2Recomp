@@ -391,7 +391,7 @@ struct PresentationState
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, PresentationState &state,
                         uint32_t &outWidth, uint32_t &outHeight)
 {
-#if defined(PLATFORM_SWITCH) || defined(__SWITCH__)
+#if (defined(PLATFORM_SWITCH) || defined(__SWITCH__)) && defined(AOE2_EXPERIMENTAL_NATIVE_GRAPHICS)
     (void)tex;
     if (auto native = rt->nativePresentationFrame()) {
         PS2PresentationFrameView view{native->pixels->data(), native->width, native->height, native->strideBytes};

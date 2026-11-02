@@ -27,7 +27,11 @@ constexpr uint32_t PS2_RAM_SIZE = 64u * 1024u * 1024u; // 64MB
 constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for 64MB alignment
 constexpr uint32_t PS2_HLE_RESERVATION_SIZE = 0x00040000u;
 constexpr uint32_t PS2_HLE_RESERVATION_BASE = PS2_RAM_SIZE - 0x00140000u;
+#if defined(AOE2_EXPERIMENTAL_EXPANDED_VIEWPORT)
 constexpr uint32_t PS2_MAP_ARENA_SIZE = 8u * 1024u * 1024u;
+#else
+constexpr uint32_t PS2_MAP_ARENA_SIZE = 0u;
+#endif
 constexpr uint32_t PS2_MAP_ARENA_BASE = PS2_HLE_RESERVATION_BASE - PS2_MAP_ARENA_SIZE;
 static_assert(PS2_MAP_ARENA_BASE + PS2_MAP_ARENA_SIZE == PS2_HLE_RESERVATION_BASE,
               "Map arena must directly precede the HLE reservation");

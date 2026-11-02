@@ -9,6 +9,8 @@ namespace
 
 MapArenaLease MapArena::claim(const void *owner)
 {
+    if (PS2_MAP_ARENA_SIZE == 0u)
+        return {};
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_active || !owner || (m_owner && m_owner != owner))
         return {};
