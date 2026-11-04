@@ -331,8 +331,67 @@ namespace
         }
     }
 
+    // Extracts the string value of `"name": "..."` from one manifest line (no escapes are used).
+    bool manifestStringField(const std::string &line, const char *name, std::string &out)
+    {
+        const std::string needle = std::string("\"") + name + "\"";
+        std::size_t pos = line.find(needle);
+        if (pos == std::string::npos) return false;
+        pos = line.find('"', line.find(':', pos + needle.size()) + 1);
+        if (pos == std::string::npos) return false;
+        const std::size_t end = line.find('"', pos + 1);
+        if (end == std::string::npos) return false;
+        out = line.substr(pos + 1, end - pos - 1);
+        return true;
+    }
+
+    bool manifestNumberField(const std::string &line, const char *name, uint64_t &out)
+    {
+        const std::string needle = std::string("\"") + name + "\"";
+        std::size_t pos = line.find(needle);
+        if (pos == std::string::npos) return false;
+        pos = line.find(':', pos + needle.size());
+        if (pos == std::string::npos) return false;
+        out = std::strtoull(line.c_str() + pos + 1, nullptr, 10);
+        return true;
+    }
+
+    // Registers every file listed in <cdRoot>/disc_layout.json at its real disc LBN, so sector
+    // reads by LBN resolve from the extracted tree without the ISO. One file object per line.
+    void ensureDiscLayoutLoaded()
+    {
+        static std::filesystem::path loadedRoot;
+        static bool attempted = false;
+        const std::filesystem::path root = getCdRootPath();
+        if (attempted && loadedRoot == root) return;
+        attempted = true;
+        loadedRoot = root;
+
+        std::ifstream manifest(root / "disc_layout.json");
+        if (!manifest.is_open()) return;
+
+        std::string line;
+        while (std::getline(manifest, line))
+        {
+            std::string path;
+            uint64_t lbn = 0, size = 0;
+            if (!manifestStringField(line, "path", path) ||
+                !manifestNumberField(line, "lbn", lbn) || !manifestNumberField(line, "size", size))
+            {
+                continue;
+            }
+            CdFileEntry entry;
+            entry.hostPath = (root / path).lexically_normal();
+            entry.sizeBytes = static_cast<uint32_t>(std::min<uint64_t>(size, 0xFFFFFFFFu));
+            entry.baseLbn = static_cast<uint32_t>(lbn);
+            entry.sectors = sectorsForBytes(size);
+            g_cdFilesByKey[cdPathKey(path)] = entry;
+        }
+    }
+
     bool registerCdFile(const std::string &ps2Path, CdFileEntry &entryOut)
     {
+        ensureDiscLayoutLoaded();
         const std::string key = cdPathKey(ps2Path);
         if (key.empty())
         {
@@ -443,6 +502,7 @@ namespace
 
     bool readCdSectors(uint32_t lbn, uint32_t sectors, uint8_t *dst, size_t byteCount)
     {
+        ensureDiscLayoutLoaded();
         for (const auto &[key, entry] : g_cdFilesByKey)
         {
             const uint32_t endLbn = entry.baseLbn + entry.sectors;
@@ -477,13 +537,14 @@ namespace
 
         std::cerr << "sceCdRead unresolved LBN 0x" << std::hex << lbn
                   << " sectors=" << std::dec << sectors
-                  << " (no mapped file and no configured CD image)" << std::endl;
+                  << " (not in disc_layout.json and no configured CD image)" << std::endl;
         g_lastCdError = -1;
         return false;
     }
 
     bool isResolvableCdLbn(uint32_t lbn)
     {
+        ensureDiscLayoutLoaded();
         for (const auto &[key, entry] : g_cdFilesByKey)
         {
             const uint32_t endLbn = entry.baseLbn + entry.sectors;
@@ -504,6 +565,7 @@ namespace
 
     bool findRegisteredCdFileForLbn(uint32_t lbn, CdFileEntry &entryOut)
     {
+        ensureDiscLayoutLoaded();
         for (const auto &[key, entry] : g_cdFilesByKey)
         {
             const uint32_t endLbn = entry.baseLbn + entry.sectors;
