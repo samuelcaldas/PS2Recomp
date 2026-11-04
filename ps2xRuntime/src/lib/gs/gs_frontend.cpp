@@ -7,9 +7,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
+#include <string>
 #if defined(__SWITCH__)
 #include <switch.h>
 #endif
@@ -112,6 +116,8 @@ namespace
 GS::GS()
     : m_backend(std::make_unique<GSCpuBackend>())
 {
+    if (std::getenv("AOE2_GS_ATLAS_DRAW_TRACE") != nullptr)
+        m_debugHistoryPaused = false;
     reset();
 }
 
@@ -444,6 +450,30 @@ void GS::recordDrawDebugEventUnlocked(int vertexCount)
         entry.zMax = std::max(entry.zMax, v.z);
         entry.aMin = std::min(entry.aMin, v.a);
         entry.aMax = std::max(entry.aMax, v.a);
+    }
+
+    static std::set<std::pair<uint32_t, uint32_t>> capturedAtlasPages;
+    if (entry.tex0.psm == GS_PSM_T8 &&
+        capturedAtlasPages.emplace(entry.tex0.tbp0, entry.tex0.cbp).second &&
+        capturedAtlasPages.size() <= 32u)
+    {
+        const uint32_t atlasDraw = static_cast<uint32_t>(capturedAtlasPages.size());
+        if (atlasDraw <= 32u)
+        {
+            const char *prefix = std::getenv("AOE2_GS_ATLAS_DRAW_TRACE");
+            if (prefix != nullptr && *prefix != '\0')
+            {
+                std::ofstream event(std::string(prefix) + "_events.bin", std::ios::binary | std::ios::app);
+                event.write(reinterpret_cast<const char *>(&entry), sizeof(entry));
+                if (m_backend != nullptr)
+                {
+                    std::vector<uint8_t> vram;
+                    m_backend->SnapshotVram(vram);
+                    std::ofstream image(std::string(prefix) + "_vram-" + std::to_string(atlasDraw) + ".bin", std::ios::binary);
+                    image.write(reinterpret_cast<const char *>(vram.data()), static_cast<std::streamsize>(vram.size()));
+                }
+            }
+        }
     }
 
     recordDebugEventUnlocked(entry);
