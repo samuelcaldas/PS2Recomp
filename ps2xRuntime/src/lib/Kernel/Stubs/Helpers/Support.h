@@ -500,46 +500,75 @@ namespace
         return true;
     }
 
+    bool readCdSectorsFromImage(uint32_t lbn, uint32_t sectors, uint8_t *dst, size_t byteCount)
+    {
+        const std::filesystem::path cdImage = getCdImagePath();
+        if (cdImage.empty())
+        {
+            return false;
+        }
+        uint64_t totalSectors = 0;
+        if (tryGetCdImageTotalSectors(totalSectors) &&
+            static_cast<uint64_t>(lbn) + sectors > totalSectors)
+        {
+            g_lastCdError = -1;
+            return false;
+        }
+        return readHostRange(cdImage, static_cast<uint64_t>(lbn) * kCdSectorSize, dst, byteCount);
+    }
+
+    // Reads sector by sector run: the disc stores files back to back, so one read may span
+    // several registered files. Sectors outside every file come from the ISO when present.
     bool readCdSectors(uint32_t lbn, uint32_t sectors, uint8_t *dst, size_t byteCount)
     {
         ensureDiscLayoutLoaded();
-        for (const auto &[key, entry] : g_cdFilesByKey)
+        std::memset(dst, 0, byteCount);
+        bool allResolved = true;
+        uint32_t done = 0;
+        while (done < sectors)
         {
-            const uint32_t endLbn = entry.baseLbn + entry.sectors;
-            if (lbn < entry.baseLbn || lbn >= endLbn)
+            const uint32_t current = lbn + done;
+            const size_t offsetBytes = static_cast<size_t>(done) * kCdSectorSize;
+            if (offsetBytes >= byteCount)
             {
-                continue;
+                break;
             }
-
-            const uint64_t relativeLbn = static_cast<uint64_t>(lbn - entry.baseLbn);
-            const uint64_t offset = relativeLbn * kCdSectorSize;
-            return readHostRange(entry.hostPath, offset, dst, byteCount);
-        }
-
-        const std::filesystem::path cdImage = getCdImagePath();
-        if (!cdImage.empty())
-        {
-            uint64_t totalSectors = 0;
-            if (tryGetCdImageTotalSectors(totalSectors))
+            const CdFileEntry *owner = nullptr;
+            for (const auto &[key, entry] : g_cdFilesByKey)
             {
-                const uint64_t start = static_cast<uint64_t>(lbn);
-                const uint64_t end = start + static_cast<uint64_t>(sectors);
-                if (start >= totalSectors || end > totalSectors)
+                if (current >= entry.baseLbn && current < entry.baseLbn + entry.sectors)
                 {
-                    g_lastCdError = -1;
-                    return false;
+                    owner = &entry;
+                    break;
                 }
             }
-
-            const uint64_t offset = static_cast<uint64_t>(lbn) * kCdSectorSize;
-            return readHostRange(cdImage, offset, dst, byteCount);
+            uint32_t run = 1;
+            bool ok = false;
+            if (owner)
+            {
+                run = std::min(sectors - done, owner->baseLbn + owner->sectors - current);
+                const size_t runBytes = std::min<size_t>(static_cast<size_t>(run) * kCdSectorSize, byteCount - offsetBytes);
+                ok = readHostRange(owner->hostPath, static_cast<uint64_t>(current - owner->baseLbn) * kCdSectorSize,
+                                   dst + offsetBytes, runBytes);
+            }
+            else
+            {
+                // Unowned sectors: take the whole remaining range from the image in one read.
+                run = sectors - done;
+                const size_t runBytes = std::min<size_t>(static_cast<size_t>(run) * kCdSectorSize, byteCount - offsetBytes);
+                ok = readCdSectorsFromImage(current, run, dst + offsetBytes, runBytes);
+                static int reported = 0;
+                if (!ok && reported++ < 20)
+                {
+                    std::cerr << "sceCdRead unresolved LBN 0x" << std::hex << current << std::dec
+                              << " (not in disc_layout.json and no readable CD image)" << std::endl;
+                }
+            }
+            allResolved = allResolved && ok;
+            done += run;
         }
-
-        std::cerr << "sceCdRead unresolved LBN 0x" << std::hex << lbn
-                  << " sectors=" << std::dec << sectors
-                  << " (not in disc_layout.json and no configured CD image)" << std::endl;
-        g_lastCdError = -1;
-        return false;
+        g_lastCdError = allResolved ? 0 : -1;
+        return allResolved;
     }
 
     bool isResolvableCdLbn(uint32_t lbn)
