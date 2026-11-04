@@ -1681,7 +1681,7 @@ void register_ps2_gs_tests()
                      "single-circuit presentation should normalize the last row alpha");
         });
 
-        tc.Run("latched host presentation line-doubles interlaced field output", [](TestCase &t)
+        tc.Run("latched host presentation preserves complete interlaced framebuffer", [](TestCase &t)
         {
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
             GSRegisters regs{};
@@ -1732,12 +1732,10 @@ void register_ps2_gs_tests()
             const uint32_t row2 = pixelAtRow(2u);
             const uint32_t row3 = pixelAtRow(3u);
 
-            t.Equals(row0, row1,
-                     "field presentation should duplicate the active field into the next scanline");
-            t.Equals(row2, row3,
-                     "field presentation should duplicate later field scanlines as well");
-            t.IsTrue(row0 != row2,
-                     "field presentation should still preserve different source content across field rows");
+            t.Equals(row0, kLine0, "presentation should preserve the first scanline");
+            t.Equals(row1, kLine1, "presentation should preserve the second scanline");
+            t.Equals(row2, kLine2, "presentation should preserve the third scanline");
+            t.Equals(row3, kLine3, "presentation should preserve the fourth scanline");
         });
 
         tc.Run("GIF PACKED A+D writes DISPFB1 and DISPLAY1 privileged registers", [](TestCase &t)
